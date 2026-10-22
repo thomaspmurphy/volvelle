@@ -36,6 +36,11 @@ claude mcp add volvelle -- "$PWD/target/release/volvelle-mcp"
 `volvelle-mcp` looks for the `volvelle` binary next to itself, then on `PATH`.
 Override with `VOLVELLE_BIN`.
 
+While developing, `scripts/install-dev.sh` installs both binaries from the
+checkout into `~/.cargo/bin` and points the MCP server at them. Run `/mcp` in
+Claude Code afterwards to reconnect, since a running server keeps the old
+binary.
+
 ## Protocol
 
 Each view follows one session type, checked at runtime by `volvelle-mcp`:
