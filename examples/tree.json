@@ -1,0 +1,30 @@
+{
+  "type": "box",
+  "title": "Open a file",
+  "children": [
+    {"type": "text", "text": "Which file should I start with?", "tone": "accent"},
+    {"type": "tree", "id": "file", "title": "volvelle", "nodes": [
+      {"label": "crates", "children": [
+        {"label": "volvelle", "children": [
+          {"label": "src", "children": [
+            {"label": "app.rs", "detail": "viewer state"},
+            {"label": "draw.rs", "detail": "layout and rendering"},
+            {"label": "tree.rs", "detail": "the tree atom"}
+          ]},
+          {"label": "Cargo.toml"}
+        ]},
+        {"label": "volvelle-mcp", "open": false, "children": [
+          {"label": "src", "children": [
+            {"label": "main.rs", "detail": "MCP server"},
+            {"label": "session.rs", "detail": "session types"}
+          ]}
+        ]},
+        {"label": "volvelle-schema", "open": false, "children": [
+          {"label": "src", "children": [{"label": "lib.rs", "detail": "the atom catalog"}]}
+        ]}
+      ]},
+      {"label": "docs", "open": false, "children": [{"label": "ROADMAP.md"}]},
+      {"label": "README.md", "detail": "start here"}
+    ]}
+  ]
+}

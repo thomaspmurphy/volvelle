@@ -60,7 +60,7 @@ exactly that shape:
  "values": {"env": "prod", "migrate": true, "note": "fix login"}}
 ```
 
-Other answers are `select` (Enter on a list with an id), `cancel` (Esc) and
+Other answers are `select` (Enter on a list or tree with an id), `cancel` (Esc) and
 `answer` (a pattern's typed value, see below). A view with no fields or
 buttons is display-only and cannot be waited on.
 
@@ -87,8 +87,8 @@ at /children/1: confirm-destructive@1 must be the only interactive element in it
 
 ## Atoms
 
-`box`, `text`, `markdown`, `table`, `list`, `input`, `select`, `toggle`,
-`button`, `progress`, `divider`. See `examples/deploy.json` and
+`box`, `text`, `markdown`, `table`, `list`, `tree`, `input`, `select`,
+`toggle`, `button`, `progress`, `divider`. See `examples/deploy.json` and
 `volvelle schema`. Atoms state intent: the viewer owns sizing, focus order and
 colour. Ids may not contain `:`, which names a pattern's parts.
 
@@ -113,10 +113,18 @@ interactive element in its view. `choose-with-preview@1` shows the preview of
 the item under the cursor without a round trip to the agent. See
 `examples/confirm.json` and `examples/choose.json`.
 
+A `tree` holds nested `nodes`, each with a `label`, optional `detail` and
+`children`, and `open: false` to start folded. A node's value defaults to its
+path of labels joined with `/`, such as `src/app/main.rs`, and values must be
+unique. With an `id` the tree is selectable and Enter answers `select` with
+the node's value; without one it is display-only. See `examples/tree.json`.
+
 ## Keys
 
 Tab and Shift-Tab move focus. Space toggles. Enter confirms or presses, and
-inserts a newline in a multi-line input. PageUp and PageDown scroll a view
+inserts a newline in a multi-line input. In a tree, Up and Down (or j and k)
+move, Right (l) unfolds or steps into a node, Left (h) folds or steps out to
+the parent, and Space toggles a fold. PageUp and PageDown scroll a view
 taller than the pane; J and K (or Shift-Up and Shift-Down) scroll a long
 preview. Esc cancels. Ctrl-C closes the viewer.
 
