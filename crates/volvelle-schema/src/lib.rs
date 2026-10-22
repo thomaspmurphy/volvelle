@@ -340,7 +340,7 @@ pub static CHOOSE_WITH_PREVIEW: PatternInfo = PatternInfo {
     name: "choose-with-preview@1",
     summary: "A list with a Markdown preview of the item under the cursor, updated without a \
         round trip. Enter answers; with multi, Space toggles items.",
-    protocol: "!Spec . ?Answer . end",
+    protocol: "!Spec . ?{answer: end, cancel: end}",
     returns: r#"{"selected": value}, or {"selected": [value]} with multi"#,
     slots: slot_schema::<ChooseWithPreview>,
     after_answer: |_| Obligation::None,
