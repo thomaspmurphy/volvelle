@@ -115,6 +115,23 @@ canvas is ruled out, since it would give validation nothing to check.
 - Animation is data changing (item 5): updating `current` moves the
   highlight. A `trace` slot plays a sequence of states locally, with pause
   and scrub. Streaming many updates needs phase 4's frame batching.
+- Full screen through herdr's native pane zoom: a viewer key toggles it,
+  and a view can request it for maps, large tables and diagrams. It is a
+  request, so the human can zoom back out, and the viewer undoes it when the
+  view closes.
+
+### 7. Terminal apps
+
+Some answers are best given in a real app, such as `lazygit` or a log tail.
+The UI never executes anything itself, so the agent can only name apps from
+an allowlist the user owns (`.volvelle/apps.toml` per project, plus a
+per-user file); anything else needs a confirmation view first.
+
+- Beside the view first: the app opens in a herdr pane next to the viewer
+  and gets a real terminal.
+- Embedded later, if a real use needs the app inside the layout: a
+  `terminal` atom drawing a pseudo-terminal's screen, with keys forwarded
+  while it has focus.
 
 ## Later
 
