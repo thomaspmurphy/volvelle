@@ -908,6 +908,7 @@ mod tests {
             include_str!("../../../examples/deploy.json"),
             include_str!("../../../examples/long.json"),
             include_str!("../../../examples/confirm.json"),
+            include_str!("../../../examples/choose.json"),
         ] {
             parse_spec(serde_json::from_str(example).unwrap()).unwrap();
         }

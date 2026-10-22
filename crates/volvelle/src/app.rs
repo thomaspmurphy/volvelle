@@ -30,6 +30,15 @@ pub enum Field {
         values: Vec<String>,
     },
     Button,
+    /// A choose-with-preview. `scroll` is the preview's first line, back at
+    /// the top whenever the cursor moves.
+    Chooser {
+        cursor: usize,
+        values: Vec<String>,
+        chosen: Vec<String>,
+        multi: bool,
+        scroll: usize,
+    },
     /// A confirm-destructive button. Confirm stays disabled until the
     /// pattern's typing part holds `require`.
     Confirm {
@@ -162,7 +171,10 @@ impl App {
                     .map(Value::String)
                     .unwrap_or(Value::Null),
                 Field::Toggle(on) => Value::Bool(*on),
-                Field::List { .. } | Field::Button | Field::Confirm { .. } => continue,
+                Field::List { .. }
+                | Field::Button
+                | Field::Chooser { .. }
+                | Field::Confirm { .. } => continue,
             };
             out.insert(id.clone(), value);
         }
@@ -320,6 +332,54 @@ impl App {
                 }
                 _ => {}
             },
+            Field::Chooser {
+                cursor,
+                values,
+                chosen,
+                multi,
+                scroll,
+            } => {
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let was = *cursor;
+                match key.code {
+                    KeyCode::Up if shift => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Down if shift => *scroll += 1,
+                    KeyCode::Char('K') => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Char('J') => *scroll += 1,
+                    KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *cursor = (*cursor + 1).min(values.len().saturating_sub(1))
+                    }
+                    KeyCode::Char(' ') if *multi => {
+                        let v = &values[*cursor];
+                        if let Some(i) = chosen.iter().position(|c| c == v) {
+                            chosen.remove(i);
+                        } else {
+                            chosen.push(v.clone());
+                        }
+                    }
+                    KeyCode::Enter if !values.is_empty() => {
+                        // With nothing toggled, Enter takes the item under the cursor.
+                        let selected = if !*multi {
+                            Value::String(values[*cursor].clone())
+                        } else if chosen.is_empty() {
+                            json!([values[*cursor]])
+                        } else {
+                            values
+                                .iter()
+                                .filter(|v| chosen.contains(v))
+                                .cloned()
+                                .collect()
+                        };
+                        let value = json!({"selected": selected});
+                        return Some(self.answer(|view, _| Event::Answer { view, id, value }));
+                    }
+                    _ => {}
+                }
+                if *cursor != was {
+                    *scroll = 0;
+                }
+            }
             Field::Confirm {
                 pattern, confirmed, ..
             } => match key.code {
@@ -382,7 +442,16 @@ fn parts(node: &Node) -> Vec<(String, Field)> {
             out.push((part(&c.id, "confirm"), button(true)));
             out
         }
-        Node::Pattern(Pattern::ChooseWithPreview(_)) => Vec::new(),
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => {
+            let chooser = Field::Chooser {
+                cursor: 0,
+                values: c.items.iter().map(|i| i.value().to_string()).collect(),
+                chosen: Vec::new(),
+                multi: c.multi,
+                scroll: 0,
+            };
+            vec![(c.id.clone(), chooser)]
+        }
         n => n
             .id()
             .map(|id| (id.to_string(), init(n)))
@@ -480,6 +549,21 @@ fn carry(prev: Field, fresh: Field) -> Field {
                 multi,
             }
         }
+        (
+            Field::Chooser {
+                cursor,
+                chosen,
+                scroll,
+                ..
+            },
+            Field::Chooser { values, multi, .. },
+        ) => Field::Chooser {
+            cursor: cursor.min(values.len().saturating_sub(1)),
+            chosen: chosen.into_iter().filter(|c| values.contains(c)).collect(),
+            values,
+            multi,
+            scroll,
+        },
         (Field::List { cursor, .. }, Field::List { values, .. }) => Field::List {
             cursor: cursor.min(values.len().saturating_sub(1)),
             values,
@@ -669,6 +753,67 @@ mod tests {
             panic!("expected an answer")
         };
         assert_eq!(value, json!({"confirmed": true}));
+    }
+
+    fn chooser(multi: bool) -> Node {
+        let items: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .map(|v| json!({"label": v.to_uppercase(), "value": v, "preview": format!("# {v}")}))
+            .collect();
+        spec(
+            json!({"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+                    "items": items, "multi": multi}),
+        )
+    }
+
+    #[test]
+    fn chooser_answers_the_item_under_the_cursor() {
+        let mut app = App::default();
+        app.render("c".into(), chooser(false));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('J'));
+        assert!(matches!(
+            app.fields["pick"],
+            Field::Chooser { scroll: 1, .. }
+        ));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
+        assert!(matches!(
+            app.fields["pick"],
+            Field::Chooser {
+                cursor: 1,
+                scroll: 0,
+                ..
+            }
+        ));
+        let Some(Event::Answer { id, value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!((id.as_str(), value), ("pick", json!({"selected": "b"})));
+    }
+
+    #[test]
+    fn multi_chooser_toggles_with_space() {
+        let mut app = App::default();
+        app.render("m".into(), chooser(true));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char(' '));
+        app.render("m".into(), chooser(true));
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": ["a", "c"]}), "in item order");
+
+        app.render("m2".into(), chooser(true));
+        press(&mut app, KeyCode::Down);
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": ["b"]}));
     }
 
     #[test]

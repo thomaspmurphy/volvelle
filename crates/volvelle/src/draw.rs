@@ -14,7 +14,8 @@ use ratatui::widgets::{
     StatefulWidget, Table, Widget, Wrap,
 };
 use volvelle_schema::{
-    Align, ButtonNode, ConfirmDestructive, Direction, InputNode, Node, Pattern, Tone,
+    Align, ButtonNode, ChooseWithPreview, ConfirmDestructive, Direction, InputNode, Node, Pattern,
+    Tone,
 };
 
 use crate::app::{self, App, Field};
@@ -107,8 +108,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     app.scroll.offset = offset;
     for (id, t) in canvas.tops {
-        if let Some(Field::Text { top, .. }) = app.fields.get_mut(&id) {
-            *top = t;
+        match app.fields.get_mut(&id) {
+            Some(Field::Text { top, .. }) => *top = t,
+            Some(Field::Chooser { scroll, .. }) => *scroll = t,
+            _ => {}
         }
     }
 
@@ -156,6 +159,12 @@ fn status_line(app: &App) -> Line<'static> {
     {
         Line::from(Span::styled(
             format!(" type {r:?} to enable · shift-tab back · esc cancel"),
+            palette::muted(),
+        ))
+    } else if let Some(Field::Chooser { multi, .. }) = app.focused_field() {
+        let toggle = if *multi { "space toggle · " } else { "" };
+        Line::from(Span::styled(
+            format!(" ↑↓ move · {toggle}J/K scroll preview · enter choose · esc cancel"),
             palette::muted(),
         ))
     } else if app.awaiting_input() {
@@ -239,7 +248,17 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Pattern(Pattern::ConfirmDestructive(c)) => {
             confirm_rows(c, width).iter().sum::<u16>() + 2
         }
-        Node::Pattern(_) => 1,
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => {
+            let [_, preview] = chooser_split(Rect::new(0, 0, width, 1));
+            let inner = preview.width.saturating_sub(2);
+            let tallest = c
+                .items
+                .iter()
+                .map(|i| wrapped(&markdown::lines(&i.preview), inner))
+                .max()
+                .unwrap_or(0);
+            (c.items.len() as u16).max(tallest).max(1) + 2
+        }
     };
     if capped(n) { h.min(cap) } else { h }
 }
@@ -569,11 +588,86 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             f.render_widget(block, area);
         }
         Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
-        Node::Pattern(p) => f.render_widget(
-            Paragraph::new(format!("{} is not drawn yet", p.info().name)).style(palette::muted()),
-            area,
-        ),
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => chooser(f, area, c, app),
     }
+}
+
+/// The list takes a third of the width, the preview the rest.
+fn chooser_split(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)])
+        .spacing(1)
+        .areas(area)
+}
+
+/// choose-with-preview: the list scrolls to its cursor and the preview
+/// follows the cursor locally. A preview taller than its box scrolls with
+/// J and K.
+fn chooser(f: &mut Canvas, area: Rect, c: &ChooseWithPreview, app: &App) {
+    let Some(Field::Chooser {
+        cursor,
+        chosen,
+        multi,
+        scroll,
+        ..
+    }) = app.fields.get(&c.id)
+    else {
+        return;
+    };
+    let focused = app.is_focused(&c.id);
+    let [left, right] = chooser_split(area);
+    let items: Vec<ListItem> = c
+        .items
+        .iter()
+        .map(|i| {
+            let mut spans = Vec::new();
+            if *multi {
+                let on = chosen.iter().any(|v| v == i.value());
+                spans.push(Span::raw(if on { "[x] " } else { "[ ] " }));
+            }
+            spans.push(Span::raw(i.label.clone()));
+            if let Some(d) = &i.detail {
+                spans.push(Span::styled(format!("  {d}"), palette::muted()));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let marker = if focused {
+        palette::accent().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new().add_modifier(Modifier::BOLD)
+    };
+    let list = List::new(items)
+        .block(frame_block(c.title.as_deref(), focused))
+        .highlight_style(marker)
+        .highlight_symbol("› ");
+    let mut state = ListState::default().with_selected(Some(*cursor));
+    f.render_stateful_widget(list, left, &mut state);
+
+    let Some(item) = c.items.get(*cursor) else {
+        return;
+    };
+    let lines = markdown::lines(&item.preview);
+    let mut block = frame_block(Some(&item.label), false);
+    let inner = block.inner(right);
+    let last = wrapped(&lines, inner.width).saturating_sub(inner.height);
+    let top = (*scroll).min(last as usize) as u16;
+    f.tops.push((c.id.clone(), top as usize));
+    let more = match (top > 0, top < last) {
+        (true, true) => " ↑↓ more ",
+        (true, false) => " ↑ more ",
+        (false, true) => " ↓ more ",
+        (false, false) => "",
+    };
+    if !more.is_empty() {
+        block = block.title_bottom(Line::styled(more, palette::muted()).right_aligned());
+    }
+    f.render_widget(block, right);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((top, 0)),
+        inner,
+    );
 }
 
 /// Rows inside a confirm-destructive's border: summary, consequence, a gap,
@@ -952,6 +1046,69 @@ mod tests {
             (drop.fg, drop.bg),
             (Color::Black, Color::Red),
             "enabled and focused"
+        );
+    }
+
+    fn chooser_spec(n: usize, preview_lines: usize) -> serde_json::Value {
+        let items: Vec<_> = (0..n)
+            .map(|i| {
+                let preview: Vec<String> = (0..preview_lines).map(|l| format!("item {i} line {l}")).collect();
+                json!({"label": format!("item {i}"), "value": format!("v{i}"), "preview": preview.join("\n")})
+            })
+            .collect();
+        json!({"type": "box", "children": [
+            {"type": "markdown", "text": "# Pick a branch"},
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "pick", "title": "Branches", "items": items}
+        ]})
+    }
+
+    #[test]
+    fn chooser_preview_follows_the_cursor() {
+        let mut a = app(chooser_spec(3, 2));
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[1].contains("Branches") && rows[1].contains("item 0"),
+            "{rows:#?}"
+        );
+        assert!(rows[2].contains("› item 0") && rows[2].contains("item 0 line 0"));
+        assert!(rows[7].contains("J/K scroll preview"));
+        a.key(KeyEvent::from(KeyCode::Down));
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[3].contains("› item 1") && rows[2].contains("item 1 line 0"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn long_chooser_scrolls_its_list_and_preview() {
+        let mut a = app(chooser_spec(20, 30));
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let (total, cap) = plan(a.spec.as_ref().unwrap(), 60, 11, &a);
+        assert_eq!((total, cap), (12, 11), "capped at the pane, not shrunk");
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[0].contains("Branches"),
+            "focus pulls the chooser into view: {rows:#?}"
+        );
+        assert!(rows[10].contains("↓ more"));
+        for _ in 0..15 {
+            a.key(KeyEvent::from(KeyCode::Down));
+        }
+        for _ in 0..25 {
+            a.key(KeyEvent::from(KeyCode::Char('J')));
+        }
+        let rows = screen(&mut term, &mut a);
+        assert!(rows.iter().any(|r| r.contains("› item 15")), "{rows:#?}");
+        assert!(
+            rows[9].contains("item 15 line 29"),
+            "preview scrolled to its end"
+        );
+        assert!(rows[10].contains("↑ more"));
+        assert!(
+            matches!(a.fields["pick"], Field::Chooser { scroll: 21, .. }),
+            "clamped"
         );
     }
 
