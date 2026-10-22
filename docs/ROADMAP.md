@@ -140,6 +140,23 @@ per-user file); anything else needs a confirmation view first.
   `terminal` atom drawing a pseudo-terminal's screen, with keys forwarded
   while it has focus.
 
+### 8. Code and diffs
+
+Agents mostly talk about code, so code and diffs are atoms like any other:
+the agent gives the text, and the viewer owns highlighting, gutters and
+layout.
+
+- `code` atom: syntax highlighting with `syntect` and an ANSI theme, so code
+  follows the terminal's palette; line numbers and highlighted lines. Code
+  fences in `markdown` are highlighted the same way.
+- `diff` atom: takes a unified diff (straight from `git diff`) or old and new
+  text, shows it side by side or unified depending on the pane's width, with
+  word-level changes and folded context.
+- `review-diff@1` pattern: accept or reject each hunk and comment on lines,
+  answered as typed decisions; a revised render keeps decisions on hunks
+  that did not change. Hunk stays the tool for full branch reviews; this is
+  for small proposals made in the flow of work.
+
 ## Later
 
 - **Phase 2, rest:** replay from the log, crystallising reused UIs into named
