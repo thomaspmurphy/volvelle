@@ -7,6 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value, json};
 use volvelle_schema::{Event, Item, Node, Pattern};
 
+use crate::tree::TreeState;
+
 /// How long the status line stays emphasised after a key on a locked view.
 const NOTICE: Duration = Duration::from_millis(1500);
 
@@ -46,6 +48,7 @@ pub enum Field {
         confirmed: bool,
         require: Option<String>,
     },
+    Tree(TreeState),
 }
 
 #[derive(Default)]
@@ -174,7 +177,8 @@ impl App {
                 Field::List { .. }
                 | Field::Button
                 | Field::Chooser { .. }
-                | Field::Confirm { .. } => continue,
+                | Field::Confirm { .. }
+                | Field::Tree(_) => continue,
             };
             out.insert(id.clone(), value);
         }
@@ -316,6 +320,16 @@ impl App {
                 }
                 _ => {}
             },
+            Field::Tree(tree) => {
+                if let Some(value) = tree.key(key.code) {
+                    return Some(self.answer(|view, values| Event::Select {
+                        view,
+                        id,
+                        value,
+                        values,
+                    }));
+                }
+            }
             Field::Button => match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     return Some(self.answer(|view, values| Event::Submit {
@@ -505,6 +519,7 @@ fn init(node: &Node) -> Field {
             }
         }
         Node::Toggle(n) => Field::Toggle(n.value),
+        Node::Tree(n) => Field::Tree(TreeState::new(n)),
         Node::List(n) => Field::List {
             cursor: 0,
             values: n.items.iter().map(|i| Item::value(i).to_string()).collect(),
@@ -575,6 +590,7 @@ fn carry(prev: Field, fresh: Field) -> Field {
             cursor: cursor.min(values.len().saturating_sub(1)),
             values,
         },
+        (Field::Tree(prev), Field::Tree(fresh)) => Field::Tree(fresh.carry(prev)),
         (_, fresh) => fresh,
     }
 }

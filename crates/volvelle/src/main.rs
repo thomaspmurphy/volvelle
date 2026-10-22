@@ -2,6 +2,7 @@ mod app;
 mod draw;
 mod link;
 mod markdown;
+mod tree;
 
 use std::cell::RefCell;
 use std::path::PathBuf;

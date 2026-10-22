@@ -31,9 +31,11 @@ it carries safe defaults and its own protocol.";
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
 a new `view` name replaces the old one. Atoms: box (row/column, optional border/title), text \
-(tone, bold, align), markdown, table, list (selectable with an id), input, select (multi \
-optional), toggle, button, progress, divider, pattern. Interactive atoms need unique ids \
-without `:`. Buttons submit every field's value. Returns the JSON Schema of the eventual answer.\n\nExample: \
+(tone, bold, align), markdown, table, list (selectable with an id), tree (nested nodes that \
+fold, selectable with an id; a node's value defaults to its label path joined with /), input, \
+select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
+unique ids without `:`. Buttons submit every field's value. Returns the JSON Schema of the \
+eventual answer.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
 {\"type\":\"toggle\",\"id\":\"migrate\",\"label\":\"Run migrations\"},\
@@ -41,7 +43,7 @@ without `:`. Buttons submit every field's value. Returns the JSON Schema of the 
 {\"type\":\"button\",\"id\":\"abort\",\"label\":\"Cancel\"}]}}";
 
 const WAIT_DESC: &str = "Wait for the user to answer a view: a button press (submit), Enter on \
-a selectable list (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
+a selectable list or tree (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
 says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
