@@ -168,6 +168,10 @@ fn status_line(app: &App) -> Line<'static> {
             format!(" ↑↓ move · {toggle}J/K scroll preview · enter choose · esc cancel"),
             palette::muted(),
         ))
+    } else if matches!(app.focused_field(), Some(Field::Tree(_))) {
+        Line::from(hint(
+            " ↑↓ move · ←→ fold · enter choose · tab next · esc cancel",
+        ))
     } else if app.awaiting_input() {
         Line::from(hint(
             " tab next · shift-tab back · space toggle · enter confirm · esc cancel",
@@ -236,7 +240,9 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Markdown(m) => wrapped(&markdown::lines(&m.text), width),
         Node::Table(t) => t.rows.len() as u16 + 3,
         Node::List(l) => l.items.len().max(1) as u16 + 2,
-        Node::Tree(t) => tree::rows(t).len().max(1) as u16 + if t.title.is_some() { 2 } else { 0 },
+        Node::Tree(t) => {
+            tree::rows(t, app).0.len().max(1) as u16 + if t.title.is_some() { 2 } else { 0 }
+        }
         Node::Input(i) if i.multiline => {
             let lines = match app.fields.get(&i.id) {
                 Some(Field::Text { value, .. }) => value.split('\n').count(),
@@ -311,6 +317,7 @@ fn flexible(n: &Node) -> bool {
     match n {
         Node::List(l) => l.id.is_some(),
         Node::Select(_) => true,
+        Node::Tree(t) => t.id.is_some(),
         Node::Box(b) => b.children.iter().any(flexible),
         _ => false,
     }
@@ -507,11 +514,22 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             f.render_stateful_widget(list, area, &mut state);
         }
         Node::Tree(t) => {
-            let mut list = List::new(tree::rows(t));
+            let focused = t.id.as_deref().is_some_and(|id| app.is_focused(id));
+            let (items, cursor) = tree::rows(t, app);
+            let mut list = List::new(items);
             if t.title.is_some() {
-                list = list.block(frame_block(t.title.as_deref(), false));
+                list = list.block(frame_block(t.title.as_deref(), focused));
             }
-            f.render_widget(list, area);
+            let mut state = ListState::default().with_selected(cursor);
+            if cursor.is_some() {
+                let marker = if focused {
+                    palette::accent().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new().add_modifier(Modifier::BOLD)
+                };
+                list = list.highlight_style(marker).highlight_symbol("› ");
+            }
+            f.render_stateful_widget(list, area, &mut state);
         }
         Node::Input(i) => {
             let focused = app.is_focused(&i.id);
