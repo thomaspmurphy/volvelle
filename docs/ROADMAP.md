@@ -3,7 +3,9 @@
 Volvelle follows the four-phase architecture: one view, then patterns and
 the log, then shared state, then concurrency and attention. Each phase is
 usable on its own, and multi-agent features wait until the single-agent loop
-is solid.
+is solid. Issues are tracked in the
+[Linear project](https://linear.app/abstractmachines/project/volvelle-0395f8b06985),
+with one milestone per phase.
 
 ## Done: phase 1, single view
 

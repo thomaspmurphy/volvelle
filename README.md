@@ -21,7 +21,9 @@ Phase 1 of the architecture: one agent, one view.
   It splits a herdr pane for the viewer on first render.
 
 Not yet built: patterns and rules, the event log, the shared-state server,
-leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`.
+leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`, and
+the [Linear project](https://linear.app/abstractmachines/project/volvelle-0395f8b06985)
+for issues.
 
 ## Install
 
