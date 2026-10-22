@@ -1,7 +1,8 @@
 //! Rendering. The viewer owns layout: atoms take their natural height,
-//! lists, tables and markdown shrink first when space runs out, and runs of
-//! buttons are laid out as a row. A spec that still does not fit is drawn
-//! off-screen at full height and the body scrolls to keep focus in view.
+//! interactive lists and selects shrink first when space runs out (they
+//! scroll inside), and runs of buttons are laid out as a row. A spec that
+//! still does not fit is drawn off-screen at full height and the body
+//! scrolls to keep focus in view, so text and tables never lose rows.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -224,6 +225,7 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Input(_) => 3,
         Node::Select(s) => s.options.len() as u16 + 2,
         Node::Toggle(_) | Node::Button(_) | Node::Progress(_) | Node::Divider(_) => 1,
+        Node::Pattern(_) => 1,
     };
     if n.id().is_some() { h.min(cap) } else { h }
 }
@@ -262,9 +264,12 @@ fn shrunk(n: &Node, width: u16, app: &App) -> u16 {
     }
 }
 
+/// Shrink-first nodes: those that scroll inside, so shrinking hides nothing
+/// the user cannot reach.
 fn flexible(n: &Node) -> bool {
     match n {
-        Node::Table(_) | Node::List(_) | Node::Markdown(_) => true,
+        Node::List(l) => l.id.is_some(),
+        Node::Select(_) => true,
         Node::Box(b) => b.children.iter().any(flexible),
         _ => false,
     }
@@ -543,6 +548,10 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             }
             f.render_widget(block, area);
         }
+        Node::Pattern(p) => f.render_widget(
+            Paragraph::new(format!("{} is not drawn yet", p.info().name)).style(palette::muted()),
+            area,
+        ),
     }
 }
 
@@ -730,13 +739,34 @@ mod tests {
     #[test]
     fn plan_shrinks_before_it_scrolls() {
         let a = app(json!({"type": "box", "children": [
-            {"type": "list", "items": ["a", "b", "c", "d", "e", "f"]},
+            {"type": "list", "id": "l", "items": ["a", "b", "c", "d", "e", "f"]},
             {"type": "toggle", "id": "x", "label": "X"}
         ]}));
         let spec = a.spec.as_ref().unwrap();
         assert_eq!(plan(spec, 20, 20, &a), (9, u16::MAX));
         assert_eq!(plan(spec, 20, 5, &a), (5, u16::MAX));
-        assert_eq!(plan(spec, 20, 3, &a), (9, 3));
+        assert_eq!(plan(spec, 20, 3, &a), (4, 3));
+    }
+
+    #[test]
+    fn text_and_tables_keep_their_rows_and_scroll() {
+        let a = app(json!({"type": "box", "children": [
+            {"type": "markdown", "text": "1\n2\n3\n4\n5\n6"},
+            {"type": "list", "items": ["a", "b", "c"]},
+            {"type": "table", "headers": ["h"], "rows": [["r1"], ["r2"]]},
+            {"type": "toggle", "id": "x", "label": "X"}
+        ]}));
+        let spec = a.spec.as_ref().unwrap();
+        assert_eq!(plan(spec, 20, 30, &a), (17, u16::MAX));
+        assert_eq!(plan(spec, 20, 8, &a), (17, 8));
+        let mut term = Terminal::new(TestBackend::new(20, 9)).unwrap();
+        let mut a = a;
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[5].contains("r2") && rows[7].contains("X"), "{rows:#?}");
+        a.key(KeyEvent::from(KeyCode::PageUp));
+        a.key(KeyEvent::from(KeyCode::PageUp));
+        let rows = screen(&mut term, &mut a);
+        assert_eq!(rows[..6].concat().replace(' ', ""), "123456");
     }
 
     #[test]

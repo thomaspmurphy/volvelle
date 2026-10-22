@@ -84,6 +84,7 @@ impl Monitor {
         let answered = match event {
             Event::Submit { view, .. }
             | Event::Select { view, .. }
+            | Event::Answer { view, .. }
             | Event::Cancel { view, .. } => view,
             Event::Closed => {
                 self.closed();
