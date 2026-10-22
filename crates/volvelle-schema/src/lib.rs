@@ -14,6 +14,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod tree;
+pub use tree::{Flat, TreeItem, TreeNode};
+
 /// One component in the UI tree.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -28,6 +31,9 @@ pub enum Node {
     Table(TableNode),
     /// A list. With an `id` it is selectable and Enter emits a `select` event.
     List(ListNode),
+    /// Nested items that fold. With an `id` it is selectable and Enter emits
+    /// a `select` event.
+    Tree(TreeNode),
     /// A text field, single-line unless `multiline`.
     Input(InputNode),
     /// Pick one option, or several with `multi`.
@@ -402,6 +408,7 @@ impl Node {
     pub fn id(&self) -> Option<&str> {
         match self {
             Node::List(n) => n.id.as_deref(),
+            Node::Tree(n) => n.id.as_deref(),
             Node::Input(n) => Some(&n.id),
             Node::Select(n) => Some(&n.id),
             Node::Toggle(n) => Some(&n.id),
@@ -564,6 +571,11 @@ pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
                 patterns.push((path.to_string(), p));
                 pattern_slots(p, path, &mut errors);
             }
+            Node::Tree(t) => {
+                for (at, rule, allowed) in t.problems() {
+                    errors.push(Violation::new(format!("{path}{at}"), rule, allowed));
+                }
+            }
             _ => {}
         }
     });
@@ -661,15 +673,12 @@ pub fn result_schema(root: &Node) -> Value {
             ..
         }) => {
             let values: Vec<&str> = items.iter().map(Item::value).collect();
-            lists.push(json!({
-                "type": "object",
-                "properties": {
-                    "type": {"const": "select"},
-                    "id": {"const": id},
-                    "value": {"enum": values},
-                    "values": {"$ref": "#/$defs/values"}
-                }
-            }));
+            lists.push(select_variant(id, &values));
+        }
+        Node::Tree(t @ TreeNode { id: Some(id), .. }) => {
+            let flat = t.flatten();
+            let values: Vec<&str> = flat.iter().map(|f| f.value.as_str()).collect();
+            lists.push(select_variant(id, &values));
         }
         Node::Pattern(p) => answers.push(json!({
             "type": "object",
@@ -704,6 +713,19 @@ pub fn result_schema(root: &Node) -> Value {
     })
 }
 
+/// The `select` answer of a list or tree, whose value is one of `values`.
+fn select_variant(id: &str, values: &[&str]) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "type": {"const": "select"},
+            "id": {"const": id},
+            "value": {"enum": values},
+            "values": {"$ref": "#/$defs/values"}
+        }
+    })
+}
+
 /// JSON Schema for a [`Node`] tree.
 pub fn node_schema() -> Value {
     serde_json::to_value(schemars::schema_for!(Node)).expect("schema serialises")
@@ -732,7 +754,7 @@ pub enum Event {
         button: String,
         values: Map<String, Value>,
     },
-    /// Enter was pressed on a selectable list item.
+    /// Enter was pressed on a selectable list item or tree node.
     Select {
         view: String,
         id: String,
@@ -925,5 +947,64 @@ mod tests {
             Obligation::ReportOutcome
         );
         assert_eq!(after(&json!({"confirmed": false})), Obligation::None);
+    }
+
+    fn tree() -> Value {
+        json!({"type": "tree", "id": "file", "title": "Files", "nodes": [
+            {"label": "src", "children": [
+                {"label": "app", "open": false, "children": [{"label": "main.rs"}]},
+                {"label": "lib.rs", "value": "lib", "detail": "2 KB"}
+            ]},
+            {"label": "Cargo.toml"}
+        ]})
+    }
+
+    #[test]
+    fn tree_values_default_to_label_paths() {
+        let Node::Tree(t) = parse_spec(tree()).unwrap() else {
+            panic!("expected a tree")
+        };
+        let values: Vec<String> = t.flatten().into_iter().map(|f| f.value).collect();
+        assert_eq!(
+            values,
+            ["src", "src/app", "src/app/main.rs", "lib", "Cargo.toml"]
+        );
+        assert!(t.nodes[0].open && !t.nodes[0].children[0].open);
+        let schema = result_schema(&Node::Tree(t));
+        assert_eq!(schema["oneOf"][1]["properties"]["id"]["const"], "file");
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["value"]["enum"],
+            json!(values)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_trees() {
+        let dup = json!({"type": "tree", "nodes": [
+            {"label": "a", "children": [{"label": "b"}]},
+            {"label": "a/b"}
+        ]});
+        assert!(
+            parse_spec(dup)
+                .unwrap_err()
+                .contains("\"a/b\" is not unique")
+        );
+        let empty = json!({"type": "tree", "id": "t", "nodes": []});
+        assert!(parse_spec(empty).unwrap_err().contains("no nodes"));
+        parse_spec(json!({"type": "tree", "nodes": []})).unwrap();
+        let unknown = json!({"type": "tree", "nodes": [{"label": "a", "folded": true}]});
+        assert!(parse_spec(unknown).is_err());
+        let Node::Tree(t) = serde_json::from_value(json!({"type": "tree", "nodes": [
+            {"label": "a", "children": [{"label": "b"}, {"label": "c", "value": "a/b"}]}
+        ]}))
+        .unwrap() else {
+            panic!("expected a tree")
+        };
+        assert_eq!(t.problems()[0].0, "/nodes/0/children/1");
+        let err = parse_spec(
+            json!({"type": "box", "children": [{"type": "tree", "id": "t", "nodes": []}]}),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("at /children/0/nodes: selectable tree has no nodes; allowed: "));
     }
 }

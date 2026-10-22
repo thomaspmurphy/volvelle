@@ -20,6 +20,7 @@ use volvelle_schema::{
 
 use crate::app::{self, App, Field};
 use crate::markdown;
+use crate::tree;
 
 pub mod palette {
     use ratatui::style::{Color, Style};
@@ -235,6 +236,7 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Markdown(m) => wrapped(&markdown::lines(&m.text), width),
         Node::Table(t) => t.rows.len() as u16 + 3,
         Node::List(l) => l.items.len().max(1) as u16 + 2,
+        Node::Tree(t) => tree::rows(t).len().max(1) as u16 + if t.title.is_some() { 2 } else { 0 },
         Node::Input(i) if i.multiline => {
             let lines = match app.fields.get(&i.id) {
                 Some(Field::Text { value, .. }) => value.split('\n').count(),
@@ -503,6 +505,13 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
                 list = list.highlight_style(marker).highlight_symbol("› ");
             }
             f.render_stateful_widget(list, area, &mut state);
+        }
+        Node::Tree(t) => {
+            let mut list = List::new(tree::rows(t));
+            if t.title.is_some() {
+                list = list.block(frame_block(t.title.as_deref(), false));
+            }
+            f.render_widget(list, area);
         }
         Node::Input(i) => {
             let focused = app.is_focused(&i.id);
