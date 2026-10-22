@@ -1,0 +1,31 @@
+{
+  "type": "box",
+  "children": [
+    {"type": "markdown", "text": "Three branches can be rebased onto `main`. Pick the ones to update."},
+    {
+      "type": "pattern",
+      "name": "choose-with-preview@1",
+      "id": "branches",
+      "title": "Branches",
+      "multi": true,
+      "items": [
+        {
+          "label": "feat/login",
+          "detail": "4 ahead",
+          "preview": "## feat/login\n\nMoves sign-in to the new session API.\n\n- `auth/session.rs` +120 -40\n- `web/login.tsx` +32 -8\n\n> Conflicts expected in `auth/mod.rs`."
+        },
+        {
+          "label": "fix/timeouts",
+          "value": "fix-timeouts",
+          "detail": "1 ahead",
+          "preview": "## fix/timeouts\n\nRaises the upstream timeout to 30 s and adds a retry.\n\n```\nclient.timeout(Duration::from_secs(30))\n```"
+        },
+        {
+          "label": "chore/deps",
+          "detail": "12 ahead",
+          "preview": "## chore/deps\n\nWeekly dependency bump.\n\n- **serde** 1.0.219\n- **tokio** 1.47\n- *nine more*"
+        }
+      ]
+    }
+  ]
+}

@@ -42,24 +42,31 @@ log and the evidence base for crystallisation.
 - Multi-line text input for edits such as commit messages.
 - Feedback when the user types into a view that has already been answered.
 
-### 3. Pattern layer
+### 3. Pattern layer (done)
 
 Agents compose mostly at the pattern level. A pattern is a named, versioned
 composition with slots, a typed return value and its own session type.
 
 - Specs accept `{"type": "pattern", "name": "confirm-destructive@1", ...}`
-  wherever an atom is allowed.
-- Nesting rules are checked in `validate`, with errors naming the path, the
-  rule and the allowed alternatives.
+  wherever an atom is allowed. Slots are plain data, so patterns cannot nest.
+- Rules are checked in `validate` and refused with the JSON Pointer, the
+  rule and the allowed alternatives: unique ids without `:`, consistent
+  select values and table widths, at most one pattern per view, and
+  confirm-destructive alone in its view.
 - First patterns:
   - `confirm-destructive@1`: summary and consequence slots, returns
-    `{confirmed: bool}`, focus starts on Cancel. The renderer enforces the
-    safe defaults so the agent cannot get them wrong.
-  - `choose-with-preview@1`: a list with a detail pane that follows the
-    cursor without a round trip, which atoms alone cannot express.
-- Each pattern declares its session type, extending the runtime monitor.
-- Tool descriptions are generated from the same declarations, so the model
-  sees the valid moves before it acts.
+    `{confirmed: bool}`, focus starts on Cancel, Confirm in the error tone
+    and gated by `require_typing`.
+  - `choose-with-preview@1`: a list with a Markdown preview that follows the
+    cursor without a round trip, scrolling with J and K when long.
+- Each pattern declares its session type and what a confirmed answer
+  obliges. The monitor enforces confirm-destructive's
+  `!Spec . ?{confirm: !Outcome . end, cancel: end}`, and `wait_event` returns
+  a `next` hint.
+- The `render` tool description's Patterns section is generated from the
+  same declarations.
+- Text and tables no longer shrink when space runs out; only interactive
+  lists and selects do, and the body scrolls.
 
 ### 4. Saved views
 

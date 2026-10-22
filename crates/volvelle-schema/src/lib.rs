@@ -4,9 +4,11 @@
 //! combines catalog pieces; it never writes rendering code. The fixed catalog
 //! is what keeps generated output valid, and its JSON Schema is the MCP tool's
 //! input schema. Atoms state intent; the viewer owns sizing, focus order and
-//! colour.
+//! colour. Patterns sit one level up: named, versioned compositions with
+//! slots, a typed answer and their own session type.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +40,8 @@ pub enum Node {
     Progress(ProgressNode),
     /// A horizontal rule, optionally titled.
     Divider(DividerNode),
+    /// A named, versioned composition. See [`patterns`].
+    Pattern(Pattern),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -224,6 +228,175 @@ pub struct DividerNode {
     pub title: Option<String>,
 }
 
+/// A pattern instance, tagged by its versioned name. Slots are plain data,
+/// never nodes, so patterns cannot nest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "name")]
+pub enum Pattern {
+    /// Asks before something that cannot be undone. Focus starts on Cancel.
+    #[serde(rename = "confirm-destructive@1")]
+    ConfirmDestructive(ConfirmDestructive),
+    /// A list beside a preview of the item under the cursor.
+    #[serde(rename = "choose-with-preview@1")]
+    ChooseWithPreview(ChooseWithPreview),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmDestructive {
+    pub id: String,
+    pub title: Option<String>,
+    /// What is about to happen, in Markdown.
+    pub summary: String,
+    /// What cannot be undone. Shown in the error tone.
+    pub consequence: String,
+    #[serde(default = "confirm_label")]
+    pub confirm_label: String,
+    #[serde(default = "cancel_label")]
+    pub cancel_label: String,
+    /// Confirm stays disabled until the user types exactly this.
+    pub require_typing: Option<String>,
+}
+
+fn confirm_label() -> String {
+    "Confirm".into()
+}
+
+fn cancel_label() -> String {
+    "Cancel".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChooseWithPreview {
+    pub id: String,
+    pub title: Option<String>,
+    pub items: Vec<PreviewItem>,
+    /// Space toggles items and the answer is an array.
+    #[serde(default)]
+    pub multi: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewItem {
+    pub label: String,
+    /// Reported in the answer. Defaults to the label.
+    pub value: Option<String>,
+    pub detail: Option<String>,
+    /// Shown beside the list while the cursor is on this item, in Markdown.
+    pub preview: String,
+}
+
+impl PreviewItem {
+    pub fn value(&self) -> &str {
+        self.value.as_deref().unwrap_or(&self.label)
+    }
+}
+
+/// What the agent owes once a pattern has answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Obligation {
+    None,
+    /// Render the same view again to report what happened.
+    ReportOutcome,
+}
+
+/// One pattern's declaration. Tool descriptions and the session monitor read
+/// it, so each pattern is described in one place.
+pub struct PatternInfo {
+    /// The versioned name specs use.
+    pub name: &'static str,
+    pub summary: &'static str,
+    /// Informal session type, from the agent's side.
+    pub protocol: &'static str,
+    /// The answer's `value`, informally.
+    pub returns: &'static str,
+    /// JSON Schema of the slots.
+    pub slots: fn() -> Value,
+    /// What the agent owes after the pattern answers with this value.
+    pub after_answer: fn(&Value) -> Obligation,
+}
+
+pub static CONFIRM_DESTRUCTIVE: PatternInfo = PatternInfo {
+    name: "confirm-destructive@1",
+    summary: "Asks before an action that cannot be undone. Focus starts on Cancel, Confirm is \
+        drawn in the error tone, and with require_typing it stays disabled until the user types \
+        that text. Must be the only interactive element in its view.",
+    protocol: "!Spec . ?{confirm: !Outcome . end, cancel: end}: after a confirmed answer, \
+        render the same view again to report what happened",
+    returns: r#"{"confirmed": bool}"#,
+    slots: slot_schema::<ConfirmDestructive>,
+    after_answer: |v| {
+        if v["confirmed"] == true {
+            Obligation::ReportOutcome
+        } else {
+            Obligation::None
+        }
+    },
+};
+
+pub static CHOOSE_WITH_PREVIEW: PatternInfo = PatternInfo {
+    name: "choose-with-preview@1",
+    summary: "A list with a Markdown preview of the item under the cursor, updated without a \
+        round trip. Enter answers; with multi, Space toggles items.",
+    protocol: "!Spec . ?{answer: end, cancel: end}",
+    returns: r#"{"selected": value}, or {"selected": [value]} with multi"#,
+    slots: slot_schema::<ChooseWithPreview>,
+    after_answer: |_| Obligation::None,
+};
+
+static PATTERNS: &[&PatternInfo] = &[&CONFIRM_DESTRUCTIVE, &CHOOSE_WITH_PREVIEW];
+
+/// Every pattern the catalog knows.
+pub fn patterns() -> &'static [&'static PatternInfo] {
+    PATTERNS
+}
+
+fn slot_schema<T: JsonSchema>() -> Value {
+    serde_json::to_value(schemars::schema_for!(T)).expect("schema serialises")
+}
+
+impl Pattern {
+    pub fn info(&self) -> &'static PatternInfo {
+        match self {
+            Pattern::ConfirmDestructive(_) => &CONFIRM_DESTRUCTIVE,
+            Pattern::ChooseWithPreview(_) => &CHOOSE_WITH_PREVIEW,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Pattern::ConfirmDestructive(p) => &p.id,
+            Pattern::ChooseWithPreview(p) => &p.id,
+        }
+    }
+
+    /// JSON Schema of this instance's answer value.
+    pub fn value_schema(&self) -> Value {
+        match self {
+            Pattern::ConfirmDestructive(_) => json!({
+                "type": "object",
+                "properties": {"confirmed": {"type": "boolean"}},
+                "required": ["confirmed"]
+            }),
+            Pattern::ChooseWithPreview(p) => {
+                let values: Vec<&str> = p.items.iter().map(PreviewItem::value).collect();
+                let selected = if p.multi {
+                    json!({"type": "array", "items": {"enum": values}})
+                } else {
+                    json!({"enum": values})
+                };
+                json!({
+                    "type": "object",
+                    "properties": {"selected": selected},
+                    "required": ["selected"]
+                })
+            }
+        }
+    }
+}
+
 impl Node {
     /// The id of an interactive node, if it has one.
     pub fn id(&self) -> Option<&str> {
@@ -233,6 +406,7 @@ impl Node {
             Node::Select(n) => Some(&n.id),
             Node::Toggle(n) => Some(&n.id),
             Node::Button(n) => Some(&n.id),
+            Node::Pattern(p) => Some(p.id()),
             _ => None,
         }
     }
@@ -246,39 +420,114 @@ impl Node {
 
     /// Depth-first walk over this node and its descendants.
     pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
-        f(self);
-        for child in self.children() {
-            child.walk(f);
+        self.walk_paths("", &mut |n, _| f(n));
+    }
+
+    /// Like [`Node::walk`], passing each node's JSON Pointer in the spec.
+    pub fn walk_paths<'a>(&'a self, path: &str, f: &mut impl FnMut(&'a Node, &str)) {
+        f(self, path);
+        for (i, child) in self.children().iter().enumerate() {
+            child.walk_paths(&format!("{path}/children/{i}"), f);
         }
     }
 }
 
-/// Checks what the JSON Schema cannot: unique ids and consistent values.
-pub fn validate(root: &Node) -> Result<(), String> {
-    let mut seen = HashSet::new();
+/// A broken rule, naming where it broke and what would be accepted instead.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Violation {
+    /// JSON Pointer into the spec; empty for the root.
+    pub path: String,
+    pub rule: String,
+    pub allowed: Vec<String>,
+}
+
+impl Violation {
+    fn new(path: impl Into<String>, rule: impl Into<String>, allowed: &[&str]) -> Self {
+        Violation {
+            path: path.into(),
+            rule: rule.into(),
+            allowed: allowed.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+}
+
+impl fmt::Display for Violation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let path = if self.path.is_empty() {
+            "/"
+        } else {
+            &self.path
+        };
+        write!(f, "at {path}: {}", self.rule)?;
+        if !self.allowed.is_empty() {
+            write!(f, "; allowed: {}", self.allowed.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+/// Checks what the JSON Schema cannot: unique ids, consistent values, and
+/// how patterns may be placed.
+pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
+    let mut seen: HashMap<&str, String> = HashMap::new();
+    let mut interactive: Vec<(String, &str)> = Vec::new();
+    let mut patterns: Vec<(String, &Pattern)> = Vec::new();
     let mut errors = Vec::new();
-    root.walk(&mut |node| {
+    root.walk_paths("", &mut |node, path| {
         if let Some(id) = node.id() {
+            let at = format!("{path}/id");
             if id.is_empty() {
-                errors.push("empty id".to_string());
-            } else if !seen.insert(id.to_string()) {
-                errors.push(format!("duplicate id {id:?}"));
+                errors.push(Violation::new(
+                    at,
+                    "empty id",
+                    &["a short name such as \"env\""],
+                ));
+            } else if id.contains(':') {
+                errors.push(Violation::new(
+                    at,
+                    format!("id {id:?} contains `:`, which is reserved for pattern parts"),
+                    &[&format!("{:?}", id.replace(':', "-"))],
+                ));
+            } else if let Some(first) = seen.get(id) {
+                errors.push(Violation::new(
+                    at,
+                    format!("duplicate id {id:?}, first used at {first}"),
+                    &["a unique id"],
+                ));
+            } else {
+                seen.insert(id, path.to_string());
             }
+            interactive.push((path.to_string(), id));
         }
         match node {
             Node::Select(s) => {
                 if s.options.is_empty() {
-                    errors.push(format!("select {:?} has no options", s.id));
-                }
-                if !s.multi && s.value.len() > 1 {
-                    errors.push(format!(
-                        "select {:?} is not multi but has several values",
-                        s.id
+                    errors.push(Violation::new(
+                        format!("{path}/options"),
+                        format!("select {:?} has no options", s.id),
+                        &["at least one option", "an input"],
                     ));
                 }
-                for v in &s.value {
+                if !s.multi && s.value.len() > 1 {
+                    errors.push(Violation::new(
+                        format!("{path}/value"),
+                        format!("select {:?} is not multi but has several values", s.id),
+                        &["one value", "\"multi\": true"],
+                    ));
+                }
+                let options: Vec<String> = s
+                    .options
+                    .iter()
+                    .map(|o| format!("{:?}", o.value()))
+                    .collect();
+                let options: Vec<&str> = options.iter().map(String::as_str).collect();
+                for (i, v) in s.value.iter().enumerate() {
                     if !s.options.iter().any(|o| o.value() == v) {
-                        errors.push(format!("select {:?} value {v:?} is not an option", s.id));
+                        errors.push(Violation::new(
+                            format!("{path}/value/{i}"),
+                            format!("select {:?} value {v:?} is not an option", s.id),
+                            &options,
+                        ));
                     }
                 }
             }
@@ -286,26 +535,99 @@ pub fn validate(root: &Node) -> Result<(), String> {
                 if let Some(w) = &t.widths
                     && w.len() != t.headers.len()
                 {
-                    errors.push("table widths must match headers".to_string());
+                    errors.push(Violation::new(
+                        format!("{path}/widths"),
+                        format!(
+                            "table has {} headers but {} widths",
+                            t.headers.len(),
+                            w.len()
+                        ),
+                        &[&format!("{} widths", t.headers.len()), "no widths"],
+                    ));
                 }
             }
             Node::Progress(p) if !(0.0..=1.0).contains(&p.value) => {
-                errors.push(format!("progress value {} is outside 0.0..=1.0", p.value));
+                errors.push(Violation::new(
+                    format!("{path}/value"),
+                    format!("progress value {} is outside 0.0..=1.0", p.value),
+                    &["a value from 0.0 to 1.0"],
+                ));
+            }
+            Node::Pattern(p) => {
+                if let Some((first, _)) = patterns.first() {
+                    errors.push(Violation::new(
+                        path,
+                        format!("a view holds at most one pattern, and {first} is one"),
+                        &["render this pattern in a later view"],
+                    ));
+                }
+                patterns.push((path.to_string(), p));
+                pattern_slots(p, path, &mut errors);
             }
             _ => {}
         }
     });
+    for (path, p) in &patterns {
+        let Pattern::ConfirmDestructive(c) = p else {
+            continue;
+        };
+        let others: Vec<String> = interactive
+            .iter()
+            .filter(|(_, id)| *id != c.id)
+            .map(|(at, id)| format!("{id:?} at {at}"))
+            .collect();
+        if !others.is_empty() {
+            errors.push(Violation::new(
+                path.as_str(),
+                format!(
+                    "confirm-destructive@1 must be the only interactive element in its view, \
+                     but the view also has {}",
+                    others.join(", ")
+                ),
+                &[
+                    "render the other fields in an earlier view",
+                    "a toggle plus a button instead of the pattern",
+                ],
+            ));
+        }
+    }
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(errors.join("; "))
+        Err(errors)
+    }
+}
+
+fn pattern_slots(p: &Pattern, path: &str, errors: &mut Vec<Violation>) {
+    match p {
+        Pattern::ConfirmDestructive(c) => {
+            if c.require_typing.as_deref() == Some("") {
+                errors.push(Violation::new(
+                    format!("{path}/require_typing"),
+                    "require_typing is empty, so it guards nothing",
+                    &["the name of what is destroyed", "no require_typing"],
+                ));
+            }
+        }
+        Pattern::ChooseWithPreview(c) => {
+            if c.items.is_empty() {
+                errors.push(Violation::new(
+                    format!("{path}/items"),
+                    "choose-with-preview@1 has no items",
+                    &["at least one item"],
+                ));
+            }
+        }
     }
 }
 
 /// Parses and validates a spec from JSON.
 pub fn parse_spec(value: Value) -> Result<Node, String> {
     let node: Node = serde_json::from_value(value).map_err(|e| format!("invalid spec: {e}"))?;
-    validate(&node)?;
+    validate(&node).map_err(|errors| {
+        let lines: Vec<String> = errors.iter().map(Violation::to_string).collect();
+        lines.join("\n")
+    })?;
     Ok(node)
 }
 
@@ -315,6 +637,7 @@ pub fn result_schema(root: &Node) -> Value {
     let mut fields = Map::new();
     let mut buttons = Vec::new();
     let mut lists = Vec::new();
+    let mut answers = Vec::new();
     root.walk(&mut |node| match node {
         Node::Input(n) => {
             fields.insert(n.id.clone(), json!({"type": "string"}));
@@ -348,6 +671,15 @@ pub fn result_schema(root: &Node) -> Value {
                 }
             }));
         }
+        Node::Pattern(p) => answers.push(json!({
+            "type": "object",
+            "properties": {
+                "type": {"const": "answer"},
+                "id": {"const": p.id()},
+                "value": p.value_schema(),
+                "values": {"$ref": "#/$defs/values"}
+            }
+        })),
         _ => {}
     });
     let mut variants = vec![json!({
@@ -365,6 +697,7 @@ pub fn result_schema(root: &Node) -> Value {
         }));
     }
     variants.extend(lists);
+    variants.extend(answers);
     json!({
         "oneOf": variants,
         "$defs": {"values": {"type": "object", "properties": fields}}
@@ -404,6 +737,13 @@ pub enum Event {
         view: String,
         id: String,
         value: String,
+        values: Map<String, Value>,
+    },
+    /// A pattern answered with its typed value.
+    Answer {
+        view: String,
+        id: String,
+        value: Value,
         values: Map<String, Value>,
     },
     /// The user pressed Esc.
@@ -461,5 +801,129 @@ mod tests {
             "array"
         );
         assert_eq!(schema["oneOf"][1]["properties"]["button"]["enum"][0], "ok");
+    }
+
+    fn confirm() -> Value {
+        json!({"type": "pattern", "name": "confirm-destructive@1", "id": "drop",
+               "summary": "Drop `users`", "consequence": "All rows are lost"})
+    }
+
+    fn errors(spec: Value) -> Vec<Violation> {
+        let node: Node = serde_json::from_value(spec).unwrap();
+        validate(&node).unwrap_err()
+    }
+
+    #[test]
+    fn parses_patterns_with_defaults() {
+        let Node::Pattern(Pattern::ConfirmDestructive(c)) = parse_spec(confirm()).unwrap() else {
+            panic!("expected confirm-destructive")
+        };
+        assert_eq!(
+            (c.confirm_label.as_str(), c.cancel_label.as_str()),
+            ("Confirm", "Cancel")
+        );
+        let choose = json!({"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+                            "items": [{"label": "a", "preview": "# A"}]});
+        let spec = parse_spec(choose).unwrap();
+        assert_eq!(spec.id(), Some("pick"));
+    }
+
+    #[test]
+    fn rejects_unknown_slots_and_names() {
+        let mut extra = confirm();
+        extra["colour"] = "red".into();
+        assert!(parse_spec(extra).unwrap_err().contains("colour"));
+        let mut nested = confirm();
+        nested["children"] = json!([confirm()]);
+        assert!(parse_spec(nested).is_err());
+        let mut unknown = confirm();
+        unknown["name"] = "confirm-destructive@2".into();
+        assert!(parse_spec(unknown).is_err());
+    }
+
+    #[test]
+    fn names_match_declarations() {
+        let choose =
+            json!({"type": "pattern", "name": "choose-with-preview@1", "id": "c", "items": []});
+        for spec in [confirm(), choose] {
+            let Node::Pattern(p) = serde_json::from_value(spec.clone()).unwrap() else {
+                panic!("expected a pattern")
+            };
+            assert_eq!(spec["name"], p.info().name);
+            assert!(patterns().iter().any(|i| i.name == p.info().name));
+        }
+    }
+
+    #[test]
+    fn violations_name_path_rule_and_alternatives() {
+        let errs = errors(json!({"type": "box", "children": [
+            {"type": "toggle", "id": "force", "label": "Force"},
+            {"type": "box", "children": [confirm()]},
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "a:b", "items": []},
+            {"type": "progress", "value": 2.0}
+        ]}));
+        let text: Vec<String> = errs.iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /children/2/id: id \"a:b\" contains `:`, which is reserved for pattern parts; allowed: \"a-b\"",
+                "at /children/2: a view holds at most one pattern, and /children/1/children/0 is one; allowed: render this pattern in a later view",
+                "at /children/2/items: choose-with-preview@1 has no items; allowed: at least one item",
+                "at /children/3/value: progress value 2 is outside 0.0..=1.0; allowed: a value from 0.0 to 1.0",
+                "at /children/1/children/0: confirm-destructive@1 must be the only interactive element in its view, but the view also has \"force\" at /children/0, \"a:b\" at /children/2; allowed: render the other fields in an earlier view, a toggle plus a button instead of the pattern",
+            ]
+        );
+        let dup = errors(json!({"type": "box", "children": [
+            {"type": "toggle", "id": "a", "label": "A"},
+            {"type": "select", "id": "a", "options": ["x"], "value": ["y"]}
+        ]}));
+        assert_eq!(dup[0].path, "/children/1/id");
+        assert!(dup[0].rule.contains("first used at /children/0"));
+        assert_eq!(dup[1].allowed, ["\"x\""]);
+    }
+
+    #[test]
+    fn pattern_answers_join_the_result_schema() {
+        let spec = parse_spec(json!({"type": "box", "children": [
+            {"type": "markdown", "text": "Pick one"},
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "pick", "multi": true,
+             "items": [{"label": "A", "value": "a", "preview": "a"}, {"label": "b", "preview": "b"}]}
+        ]}))
+        .unwrap();
+        let answer = &result_schema(&spec)["oneOf"][1];
+        assert_eq!(answer["properties"]["type"]["const"], "answer");
+        assert_eq!(answer["properties"]["values"]["$ref"], "#/$defs/values");
+        assert_eq!(answer["properties"]["id"]["const"], "pick");
+        assert_eq!(
+            answer["properties"]["value"]["properties"]["selected"]["items"]["enum"],
+            json!(["a", "b"])
+        );
+        let confirm = result_schema(&parse_spec(confirm()).unwrap());
+        assert_eq!(
+            confirm["oneOf"][1]["properties"]["value"]["properties"]["confirmed"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn examples_parse() {
+        for example in [
+            include_str!("../../../examples/deploy.json"),
+            include_str!("../../../examples/long.json"),
+            include_str!("../../../examples/confirm.json"),
+            include_str!("../../../examples/choose.json"),
+        ] {
+            parse_spec(serde_json::from_str(example).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn confirm_obliges_an_outcome_only_when_confirmed() {
+        let after = CONFIRM_DESTRUCTIVE.after_answer;
+        assert_eq!(
+            after(&json!({"confirmed": true})),
+            Obligation::ReportOutcome
+        );
+        assert_eq!(after(&json!({"confirmed": false})), Obligation::None);
     }
 }

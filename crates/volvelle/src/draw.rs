@@ -1,7 +1,8 @@
 //! Rendering. The viewer owns layout: atoms take their natural height,
-//! lists, tables and markdown shrink first when space runs out, and runs of
-//! buttons are laid out as a row. A spec that still does not fit is drawn
-//! off-screen at full height and the body scrolls to keep focus in view.
+//! interactive lists and selects shrink first when space runs out (they
+//! scroll inside), and runs of buttons are laid out as a row. A spec that
+//! still does not fit is drawn off-screen at full height and the body
+//! scrolls to keep focus in view, so text and tables never lose rows.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -12,7 +13,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row,
     StatefulWidget, Table, Widget, Wrap,
 };
-use volvelle_schema::{Align, Direction, InputNode, Node, Tone};
+use volvelle_schema::{
+    Align, ButtonNode, ChooseWithPreview, ConfirmDestructive, Direction, InputNode, Node, Pattern,
+    Tone,
+};
 
 use crate::app::{self, App, Field};
 use crate::markdown;
@@ -104,8 +108,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     app.scroll.offset = offset;
     for (id, t) in canvas.tops {
-        if let Some(Field::Text { top, .. }) = app.fields.get_mut(&id) {
-            *top = t;
+        match app.fields.get_mut(&id) {
+            Some(Field::Text { top, .. }) => *top = t,
+            Some(Field::Chooser { scroll, .. }) => *scroll = t,
+            _ => {}
         }
     }
 
@@ -145,6 +151,21 @@ fn status_line(app: &App) -> Line<'static> {
     ) {
         Line::from(hint(
             " tab next · shift-tab back · enter newline · esc cancel",
+        ))
+    } else if let Some(Field::Confirm {
+        require: Some(r), ..
+    }) = app.focused_field()
+        && !app.enabled(app.focused_id().unwrap_or_default())
+    {
+        Line::from(Span::styled(
+            format!(" type {r:?} to enable · shift-tab back · esc cancel"),
+            palette::muted(),
+        ))
+    } else if let Some(Field::Chooser { multi, .. }) = app.focused_field() {
+        let toggle = if *multi { "space toggle · " } else { "" };
+        Line::from(Span::styled(
+            format!(" ↑↓ move · {toggle}J/K scroll preview · enter choose · esc cancel"),
+            palette::muted(),
         ))
     } else if app.awaiting_input() {
         Line::from(hint(
@@ -224,8 +245,28 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Input(_) => 3,
         Node::Select(s) => s.options.len() as u16 + 2,
         Node::Toggle(_) | Node::Button(_) | Node::Progress(_) | Node::Divider(_) => 1,
+        Node::Pattern(Pattern::ConfirmDestructive(c)) => {
+            confirm_rows(c, width).iter().sum::<u16>() + 2
+        }
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => {
+            let [_, preview] = chooser_split(Rect::new(0, 0, width, 1));
+            let inner = preview.width.saturating_sub(2);
+            let tallest = c
+                .items
+                .iter()
+                .map(|i| wrapped(&markdown::lines(&i.preview), inner))
+                .max()
+                .unwrap_or(0);
+            (c.items.len() as u16).max(tallest).max(1) + 2
+        }
     };
-    if n.id().is_some() { h.min(cap) } else { h }
+    if capped(n) { h.min(cap) } else { h }
+}
+
+/// Focusable leaves are capped at the pane so they can be shown whole. A
+/// confirm-destructive is not a leaf: its parts take focus.
+fn capped(n: &Node) -> bool {
+    n.id().is_some() && !matches!(n, Node::Pattern(Pattern::ConfirmDestructive(_)))
 }
 
 /// Height of a node once every shrink-first node inside it has given way,
@@ -262,9 +303,12 @@ fn shrunk(n: &Node, width: u16, app: &App) -> u16 {
     }
 }
 
+/// Shrink-first nodes: those that scroll inside, so shrinking hides nothing
+/// the user cannot reach.
 fn flexible(n: &Node) -> bool {
     match n {
-        Node::Table(_) | Node::List(_) | Node::Markdown(_) => true,
+        Node::List(l) => l.id.is_some(),
+        Node::Select(_) => true,
         Node::Box(b) => b.children.iter().any(flexible),
         _ => false,
     }
@@ -543,6 +587,153 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             }
             f.render_widget(block, area);
         }
+        Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => chooser(f, area, c, app),
+    }
+}
+
+/// The list takes a third of the width, the preview the rest.
+fn chooser_split(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)])
+        .spacing(1)
+        .areas(area)
+}
+
+/// choose-with-preview: the list scrolls to its cursor and the preview
+/// follows the cursor locally. A preview taller than its box scrolls with
+/// J and K.
+fn chooser(f: &mut Canvas, area: Rect, c: &ChooseWithPreview, app: &App) {
+    let Some(Field::Chooser {
+        cursor,
+        chosen,
+        multi,
+        scroll,
+        ..
+    }) = app.fields.get(&c.id)
+    else {
+        return;
+    };
+    let focused = app.is_focused(&c.id);
+    let [left, right] = chooser_split(area);
+    let items: Vec<ListItem> = c
+        .items
+        .iter()
+        .map(|i| {
+            let mut spans = Vec::new();
+            if *multi {
+                let on = chosen.iter().any(|v| v == i.value());
+                spans.push(Span::raw(if on { "[x] " } else { "[ ] " }));
+            }
+            spans.push(Span::raw(i.label.clone()));
+            if let Some(d) = &i.detail {
+                spans.push(Span::styled(format!("  {d}"), palette::muted()));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let marker = if focused {
+        palette::accent().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new().add_modifier(Modifier::BOLD)
+    };
+    let list = List::new(items)
+        .block(frame_block(c.title.as_deref(), focused))
+        .highlight_style(marker)
+        .highlight_symbol("› ");
+    let mut state = ListState::default().with_selected(Some(*cursor));
+    f.render_stateful_widget(list, left, &mut state);
+
+    let Some(item) = c.items.get(*cursor) else {
+        return;
+    };
+    let lines = markdown::lines(&item.preview);
+    let mut block = frame_block(Some(&item.label), false);
+    let inner = block.inner(right);
+    let last = wrapped(&lines, inner.width).saturating_sub(inner.height);
+    let top = (*scroll).min(last as usize) as u16;
+    f.tops.push((c.id.clone(), top as usize));
+    let more = match (top > 0, top < last) {
+        (true, true) => " ↑↓ more ",
+        (true, false) => " ↑ more ",
+        (false, true) => " ↓ more ",
+        (false, false) => "",
+    };
+    if !more.is_empty() {
+        block = block.title_bottom(Line::styled(more, palette::muted()).right_aligned());
+    }
+    f.render_widget(block, right);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((top, 0)),
+        inner,
+    );
+}
+
+/// Rows inside a confirm-destructive's border: summary, consequence, a gap,
+/// the typing field if any, and the buttons.
+fn confirm_rows(c: &ConfirmDestructive, width: u16) -> [u16; 5] {
+    let inner = width.saturating_sub(2);
+    [
+        wrapped(&markdown::lines(&c.summary), inner),
+        wrapped(&text_lines(&c.consequence), inner),
+        1,
+        if c.require_typing.is_some() { 3 } else { 0 },
+        1,
+    ]
+}
+
+/// The renderer owns the safe defaults: an error-toned frame, Cancel first
+/// and focused, Confirm in the error tone and disabled until typed.
+fn confirm(f: &mut Canvas, area: Rect, c: &ConfirmDestructive, app: &App) {
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(tone(Tone::Error));
+    if let Some(t) = &c.title {
+        block = block.title(Span::styled(format!(" {t} "), Style::new().bold()));
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = confirm_rows(c, area.width).map(Constraint::Length);
+    let [summary, consequence, _, typing, row] = Layout::vertical(rows).areas(inner);
+    f.render_widget(
+        Paragraph::new(markdown::lines(&c.summary)).wrap(Wrap { trim: false }),
+        summary,
+    );
+    f.render_widget(
+        Paragraph::new(text_lines(&c.consequence))
+            .style(tone(Tone::Error).bold())
+            .wrap(Wrap { trim: false }),
+        consequence,
+    );
+    if let Some(r) = &c.require_typing {
+        let input = Node::Input(InputNode {
+            id: app::part(&c.id, "typing"),
+            label: Some(format!("Type {r:?} to confirm")),
+            placeholder: None,
+            value: String::new(),
+            secret: false,
+            multiline: false,
+        });
+        node(f, typing, &input, app);
+    }
+    let button = |name, label: &str, tone| {
+        Node::Button(ButtonNode {
+            id: app::part(&c.id, name),
+            label: label.to_string(),
+            tone,
+        })
+    };
+    let cancel = button("cancel", &c.cancel_label, Tone::Normal);
+    let confirm = button("confirm", &c.confirm_label, Tone::Error);
+    buttons(f, row, &[&cancel, &confirm], app);
+    // Keep the whole question in view while one of its parts has focus.
+    let prefix = format!("{}:", c.id);
+    if area.height <= f.cap
+        && app.focused_id().is_some_and(|id| id.starts_with(&prefix))
+        && !app.answered
+    {
+        f.focus = Some(area);
     }
 }
 
@@ -665,7 +856,14 @@ fn buttons(f: &mut Canvas, area: Rect, run: &[&Node], app: &App) {
             spans.push(Span::raw("  "));
         }
         let base = tone(b.tone);
-        let span = if app.is_focused(&b.id) {
+        let span = if !app.enabled(&b.id) {
+            let style = if app.is_focused(&b.id) {
+                Style::new().fg(Color::Black).bg(Color::DarkGray)
+            } else {
+                palette::muted()
+            };
+            Span::styled(format!("[ {} ]", b.label), style)
+        } else if app.is_focused(&b.id) {
             let bg = base.fg.unwrap_or(Color::Cyan);
             Span::styled(
                 format!("[ {} ]", b.label),
@@ -730,13 +928,34 @@ mod tests {
     #[test]
     fn plan_shrinks_before_it_scrolls() {
         let a = app(json!({"type": "box", "children": [
-            {"type": "list", "items": ["a", "b", "c", "d", "e", "f"]},
+            {"type": "list", "id": "l", "items": ["a", "b", "c", "d", "e", "f"]},
             {"type": "toggle", "id": "x", "label": "X"}
         ]}));
         let spec = a.spec.as_ref().unwrap();
         assert_eq!(plan(spec, 20, 20, &a), (9, u16::MAX));
         assert_eq!(plan(spec, 20, 5, &a), (5, u16::MAX));
-        assert_eq!(plan(spec, 20, 3, &a), (9, 3));
+        assert_eq!(plan(spec, 20, 3, &a), (4, 3));
+    }
+
+    #[test]
+    fn text_and_tables_keep_their_rows_and_scroll() {
+        let a = app(json!({"type": "box", "children": [
+            {"type": "markdown", "text": "1\n2\n3\n4\n5\n6"},
+            {"type": "list", "items": ["a", "b", "c"]},
+            {"type": "table", "headers": ["h"], "rows": [["r1"], ["r2"]]},
+            {"type": "toggle", "id": "x", "label": "X"}
+        ]}));
+        let spec = a.spec.as_ref().unwrap();
+        assert_eq!(plan(spec, 20, 30, &a), (17, u16::MAX));
+        assert_eq!(plan(spec, 20, 8, &a), (17, 8));
+        let mut term = Terminal::new(TestBackend::new(20, 9)).unwrap();
+        let mut a = a;
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[5].contains("r2") && rows[7].contains("X"), "{rows:#?}");
+        a.key(KeyEvent::from(KeyCode::PageUp));
+        a.key(KeyEvent::from(KeyCode::PageUp));
+        let rows = screen(&mut term, &mut a);
+        assert_eq!(rows[..6].concat().replace(' ', ""), "123456");
     }
 
     #[test]
@@ -788,6 +1007,109 @@ mod tests {
         let rows = screen(&mut term, &mut a);
         assert!(rows.iter().any(|r| r.contains("Description")));
         assert!(rows[29].contains("enter newline"));
+    }
+
+    #[test]
+    fn confirm_draws_safe_defaults() {
+        let mut a = app(
+            json!({"type": "pattern", "name": "confirm-destructive@1", "id": "drop",
+            "title": "Drop table", "summary": "Drop **users**", "consequence": "All rows are lost",
+            "confirm_label": "Drop", "require_typing": "users"}),
+        );
+        let mut term = Terminal::new(TestBackend::new(40, 11)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[0].contains("Drop table"), "{rows:#?}");
+        assert!(rows[1].contains("Drop users") && rows[2].contains("All rows are lost"));
+        assert!(rows[4].contains("Type \"users\" to confirm"));
+        assert!(rows[7].contains("[ Cancel ]  [ Drop ]"));
+        let buf = term.backend().buffer();
+        let at = |s: &str| rows[7].find(s).unwrap() as u16;
+        let (cancel, drop) = (&buf[(at("Cancel"), 7)], &buf[(at("Drop"), 7)]);
+        assert_eq!(cancel.bg, Color::Cyan, "focus starts on Cancel");
+        assert_eq!(
+            (drop.fg, drop.bg),
+            (Color::DarkGray, Color::Reset),
+            "disabled"
+        );
+        assert_eq!(buf[(0, 0)].fg, Color::Red);
+
+        for c in "users".chars() {
+            a.key(KeyEvent::from(KeyCode::BackTab));
+            a.key(KeyEvent::from(KeyCode::Char(c)));
+            a.key(KeyEvent::from(KeyCode::Tab));
+        }
+        a.key(KeyEvent::from(KeyCode::Tab));
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[5].contains("users"), "{rows:#?}");
+        let drop = &term.backend().buffer()[(at("Drop"), 7)];
+        assert_eq!(
+            (drop.fg, drop.bg),
+            (Color::Black, Color::Red),
+            "enabled and focused"
+        );
+    }
+
+    fn chooser_spec(n: usize, preview_lines: usize) -> serde_json::Value {
+        let items: Vec<_> = (0..n)
+            .map(|i| {
+                let preview: Vec<String> = (0..preview_lines).map(|l| format!("item {i} line {l}")).collect();
+                json!({"label": format!("item {i}"), "value": format!("v{i}"), "preview": preview.join("\n")})
+            })
+            .collect();
+        json!({"type": "box", "children": [
+            {"type": "markdown", "text": "# Pick a branch"},
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "pick", "title": "Branches", "items": items}
+        ]})
+    }
+
+    #[test]
+    fn chooser_preview_follows_the_cursor() {
+        let mut a = app(chooser_spec(3, 2));
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[1].contains("Branches") && rows[1].contains("item 0"),
+            "{rows:#?}"
+        );
+        assert!(rows[2].contains("› item 0") && rows[2].contains("item 0 line 0"));
+        assert!(rows[7].contains("J/K scroll preview"));
+        a.key(KeyEvent::from(KeyCode::Down));
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[3].contains("› item 1") && rows[2].contains("item 1 line 0"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn long_chooser_scrolls_its_list_and_preview() {
+        let mut a = app(chooser_spec(20, 30));
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let (total, cap) = plan(a.spec.as_ref().unwrap(), 60, 11, &a);
+        assert_eq!((total, cap), (12, 11), "capped at the pane, not shrunk");
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[0].contains("Branches"),
+            "focus pulls the chooser into view: {rows:#?}"
+        );
+        assert!(rows[10].contains("↓ more"));
+        for _ in 0..15 {
+            a.key(KeyEvent::from(KeyCode::Down));
+        }
+        for _ in 0..25 {
+            a.key(KeyEvent::from(KeyCode::Char('J')));
+        }
+        let rows = screen(&mut term, &mut a);
+        assert!(rows.iter().any(|r| r.contains("› item 15")), "{rows:#?}");
+        assert!(
+            rows[9].contains("item 15 line 29"),
+            "preview scrolled to its end"
+        );
+        assert!(rows[10].contains("↑ more"));
+        assert!(
+            matches!(a.fields["pick"], Field::Chooser { scroll: 21, .. }),
+            "clamped"
+        );
     }
 
     #[test]

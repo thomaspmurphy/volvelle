@@ -12,15 +12,16 @@ interfaces.
 
 Phase 1 of the architecture: one agent, one view.
 
-- `volvelle-schema`: the atom catalog as serde types, JSON Schema via
-  schemars, validation, and the result schema each spec answers with.
+- `volvelle-schema`: the atom catalog and patterns as serde types, JSON
+  Schema via schemars, validation rules with path-level errors, and the
+  result schema each spec answers with.
 - `volvelle`: the viewer. `volvelle view --socket PATH` serves specs over a
   Unix socket; `volvelle show spec.json` renders one file and prints the
   answer; `volvelle schema` prints the catalog schema.
 - `volvelle-mcp`: stdio MCP server with `render`, `wait_event` and `close`.
   It splits a herdr pane for the viewer on first render.
 
-Not yet built: patterns and rules, the event log, the shared-state server,
+Not yet built: replay from the event log, the shared-state server,
 leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`, and
 the [Linear project](https://linear.app/abstractmachines/project/volvelle-0395f8b06985)
 for issues.
@@ -59,21 +60,65 @@ exactly that shape:
  "values": {"env": "prod", "migrate": true, "note": "fix login"}}
 ```
 
-Other answers are `select` (Enter on a list with an id) and `cancel` (Esc).
-A view with no fields or buttons is display-only and cannot be waited on.
+Other answers are `select` (Enter on a list with an id), `cancel` (Esc) and
+`answer` (a pattern's typed value, see below). A view with no fields or
+buttons is display-only and cannot be waited on.
+
+A pattern extends its view's session type. `confirm-destructive@1` is
+
+```text
+!Spec . ?{confirm: !Outcome . end, cancel: end}
+```
+
+so after `{"confirmed": true}` the agent owes the user an outcome: the only
+move allowed is to render the same view again with what happened.
+`wait_event` says so in a `next` hint, and anything else is refused:
+
+```text
+view "delete" was confirmed; report the outcome by rendering view "delete"; allowed next: render view "delete"
+```
+
+Specs that break a rule are refused with the path, the rule and what would
+be accepted instead:
+
+```text
+at /children/1: confirm-destructive@1 must be the only interactive element in its view, but the view also has "force" at /children/2; allowed: render the other fields in an earlier view, a toggle plus a button instead of the pattern
+```
 
 ## Atoms
 
 `box`, `text`, `markdown`, `table`, `list`, `input`, `select`, `toggle`,
 `button`, `progress`, `divider`. See `examples/deploy.json` and
 `volvelle schema`. Atoms state intent: the viewer owns sizing, focus order and
-colour.
+colour. Ids may not contain `:`, which names a pattern's parts.
+
+## Patterns
+
+A pattern is a named, versioned composition with slots, a typed answer and
+its own session type. It goes wherever an atom does, written as
+`{"type": "pattern", "name": "<name>@<version>", ...slots}`. Slots are plain
+data, so patterns never nest, and a view holds at most one. Each pattern is
+declared once in `volvelle-schema`; the `render` tool description and the
+session monitor are generated from that declaration.
+
+| Pattern | Slots | Answer `value` |
+| --- | --- | --- |
+| `confirm-destructive@1` | `id`, `summary` (Markdown), `consequence`, `title?`, `confirm_label?`, `cancel_label?`, `require_typing?` | `{"confirmed": bool}` |
+| `choose-with-preview@1` | `id`, `items` (`label`, `preview` in Markdown, `value?`, `detail?`), `title?`, `multi?` | `{"selected": value}`, or an array with `multi` |
+
+`confirm-destructive@1` enforces the safe defaults: focus starts on Cancel,
+Confirm is drawn in the error tone, and with `require_typing` it stays
+disabled until the user types that text exactly. It must be the only
+interactive element in its view. `choose-with-preview@1` shows the preview of
+the item under the cursor without a round trip to the agent. See
+`examples/confirm.json` and `examples/choose.json`.
 
 ## Keys
 
 Tab and Shift-Tab move focus. Space toggles. Enter confirms or presses, and
 inserts a newline in a multi-line input. PageUp and PageDown scroll a view
-taller than the pane. Esc cancels. Ctrl-C closes the viewer.
+taller than the pane; J and K (or Shift-Up and Shift-Down) scroll a long
+preview. Esc cancels. Ctrl-C closes the viewer.
 
 ## Environment
 

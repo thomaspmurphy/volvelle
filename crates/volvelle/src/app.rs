@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde_json::{Map, Value};
-use volvelle_schema::{Event, Item, Node};
+use serde_json::{Map, Value, json};
+use volvelle_schema::{Event, Item, Node, Pattern};
 
 /// How long the status line stays emphasised after a key on a locked view.
 const NOTICE: Duration = Duration::from_millis(1500);
@@ -30,6 +30,22 @@ pub enum Field {
         values: Vec<String>,
     },
     Button,
+    /// A choose-with-preview. `scroll` is the preview's first line, back at
+    /// the top whenever the cursor moves.
+    Chooser {
+        cursor: usize,
+        values: Vec<String>,
+        chosen: Vec<String>,
+        multi: bool,
+        scroll: usize,
+    },
+    /// A confirm-destructive button. Confirm stays disabled until the
+    /// pattern's typing part holds `require`.
+    Confirm {
+        pattern: String,
+        confirmed: bool,
+        require: Option<String>,
+    },
 }
 
 #[derive(Default)]
@@ -67,18 +83,19 @@ impl App {
         let mut order = Vec::new();
         let mut fields = HashMap::new();
         spec.walk(&mut |node| {
-            let Some(id) = node.id() else { return };
-            let fresh = init(node);
-            let field = match old.remove(id) {
-                Some(prev) if same_view => carry(prev, fresh),
-                _ => fresh,
-            };
-            order.push(id.to_string());
-            fields.insert(id.to_string(), field);
+            for (id, fresh) in parts(node) {
+                let field = match old.remove(&id) {
+                    Some(prev) if same_view => carry(prev, fresh),
+                    _ => fresh,
+                };
+                order.push(id.clone());
+                fields.insert(id, field);
+            }
         });
         self.focus = focused
             .filter(|_| same_view)
             .and_then(|f| order.iter().position(|id| *id == f))
+            .or_else(|| start(&spec, &order))
             .unwrap_or(0);
         if !same_view {
             self.scroll = Scroll {
@@ -102,6 +119,21 @@ impl App {
         !self.answered && self.focused_id() == Some(id)
     }
 
+    /// False for a Confirm still waiting on its typed text.
+    pub fn enabled(&self, id: &str) -> bool {
+        match self.fields.get(id) {
+            Some(Field::Confirm {
+                pattern,
+                confirmed: true,
+                require: Some(r),
+            }) => matches!(
+                self.fields.get(&part(pattern, "typing")),
+                Some(Field::Text { value, .. }) if value == r
+            ),
+            _ => true,
+        }
+    }
+
     pub fn focused_field(&self) -> Option<&Field> {
         self.fields
             .get(self.focused_id()?)
@@ -122,9 +154,10 @@ impl App {
         self.spec.is_some() && !self.answered && !self.order.is_empty()
     }
 
+    /// Field values by id. Pattern parts answer through their pattern.
     pub fn values(&self) -> Map<String, Value> {
         let mut out = Map::new();
-        for id in &self.order {
+        for id in self.order.iter().filter(|id| !id.contains(':')) {
             let value = match &self.fields[id] {
                 Field::Text { value, .. } => Value::String(value.clone()),
                 Field::Choice {
@@ -138,7 +171,10 @@ impl App {
                     .map(Value::String)
                     .unwrap_or(Value::Null),
                 Field::Toggle(on) => Value::Bool(*on),
-                Field::List { .. } | Field::Button => continue,
+                Field::List { .. }
+                | Field::Button
+                | Field::Chooser { .. }
+                | Field::Confirm { .. } => continue,
             };
             out.insert(id.clone(), value);
         }
@@ -179,6 +215,7 @@ impl App {
             _ => {}
         }
         let id = self.focused_id()?.to_string();
+        let enabled = self.enabled(&id);
         let field = self.fields.get_mut(&id)?;
         match field {
             Field::Text {
@@ -295,6 +332,76 @@ impl App {
                 }
                 _ => {}
             },
+            Field::Chooser {
+                cursor,
+                values,
+                chosen,
+                multi,
+                scroll,
+            } => {
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                let was = *cursor;
+                match key.code {
+                    KeyCode::Up if shift => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Down if shift => *scroll += 1,
+                    KeyCode::Char('K') => *scroll = scroll.saturating_sub(1),
+                    KeyCode::Char('J') => *scroll += 1,
+                    KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *cursor = (*cursor + 1).min(values.len().saturating_sub(1))
+                    }
+                    KeyCode::Char(' ') if *multi => {
+                        let v = &values[*cursor];
+                        if let Some(i) = chosen.iter().position(|c| c == v) {
+                            chosen.remove(i);
+                        } else {
+                            chosen.push(v.clone());
+                        }
+                    }
+                    KeyCode::Enter if !values.is_empty() => {
+                        // With nothing toggled, Enter takes the item under the cursor.
+                        let selected = if !*multi {
+                            Value::String(values[*cursor].clone())
+                        } else if chosen.is_empty() {
+                            json!([values[*cursor]])
+                        } else {
+                            values
+                                .iter()
+                                .filter(|v| chosen.contains(v))
+                                .cloned()
+                                .collect()
+                        };
+                        let value = json!({"selected": selected});
+                        return Some(self.answer(|view, values| Event::Answer {
+                            view,
+                            id,
+                            value,
+                            values,
+                        }));
+                    }
+                    _ => {}
+                }
+                if *cursor != was {
+                    *scroll = 0;
+                }
+            }
+            Field::Confirm {
+                pattern, confirmed, ..
+            } => match key.code {
+                KeyCode::Enter | KeyCode::Char(' ') if enabled => {
+                    let (id, value) = (pattern.clone(), json!({"confirmed": *confirmed}));
+                    return Some(self.answer(|view, values| Event::Answer {
+                        view,
+                        id,
+                        value,
+                        values,
+                    }));
+                }
+                // No letter keys: a stray keystroke must not reach Confirm.
+                KeyCode::Left | KeyCode::Up => return self.move_focus(-1),
+                KeyCode::Right | KeyCode::Down => return self.move_focus(1),
+                _ => {}
+            },
         }
         None
     }
@@ -311,6 +418,65 @@ impl App {
         self.answered = true;
         make(self.view.clone(), self.values())
     }
+}
+
+/// The id of a pattern's part, such as `drop:cancel`. Spec ids may not
+/// contain `:`, so these never clash.
+pub fn part(pattern: &str, name: &str) -> String {
+    format!("{pattern}:{name}")
+}
+
+/// The focusable fields a node adds, in focus order.
+fn parts(node: &Node) -> Vec<(String, Field)> {
+    match node {
+        Node::Pattern(Pattern::ConfirmDestructive(c)) => {
+            let button = |confirmed| Field::Confirm {
+                pattern: c.id.clone(),
+                confirmed,
+                require: c.require_typing.clone(),
+            };
+            let mut out = Vec::new();
+            if c.require_typing.is_some() {
+                let typing = Field::Text {
+                    value: String::new(),
+                    cursor: 0,
+                    top: 0,
+                    multiline: false,
+                };
+                out.push((part(&c.id, "typing"), typing));
+            }
+            out.push((part(&c.id, "cancel"), button(false)));
+            out.push((part(&c.id, "confirm"), button(true)));
+            out
+        }
+        Node::Pattern(Pattern::ChooseWithPreview(c)) => {
+            let chooser = Field::Chooser {
+                cursor: 0,
+                values: c.items.iter().map(|i| i.value().to_string()).collect(),
+                chosen: Vec::new(),
+                multi: c.multi,
+                scroll: 0,
+            };
+            vec![(c.id.clone(), chooser)]
+        }
+        n => n
+            .id()
+            .map(|id| (id.to_string(), init(n)))
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Where focus starts in a fresh view: on Cancel if the view asks to
+/// confirm something destructive, else on the first field.
+fn start(spec: &Node, order: &[String]) -> Option<usize> {
+    let mut cancel = None;
+    spec.walk(&mut |n| {
+        if let Node::Pattern(Pattern::ConfirmDestructive(c)) = n {
+            cancel = Some(part(&c.id, "cancel"));
+        }
+    });
+    order.iter().position(|id| Some(id) == cancel.as_ref())
 }
 
 fn init(node: &Node) -> Field {
@@ -390,6 +556,21 @@ fn carry(prev: Field, fresh: Field) -> Field {
                 multi,
             }
         }
+        (
+            Field::Chooser {
+                cursor,
+                chosen,
+                scroll,
+                ..
+            },
+            Field::Chooser { values, multi, .. },
+        ) => Field::Chooser {
+            cursor: cursor.min(values.len().saturating_sub(1)),
+            chosen: chosen.into_iter().filter(|c| values.contains(c)).collect(),
+            values,
+            multi,
+            scroll,
+        },
         (Field::List { cursor, .. }, Field::List { values, .. }) => Field::List {
             cursor: cursor.min(values.len().saturating_sub(1)),
             values,
@@ -521,6 +702,165 @@ mod tests {
             panic!("expected submit")
         };
         assert_eq!(values["msg"], "hél·lo\nwörd");
+    }
+
+    fn confirm(require: Option<&str>) -> Node {
+        spec(json!({"type": "box", "children": [
+            {"type": "text", "text": "Branch cleanup"},
+            {"type": "pattern", "name": "confirm-destructive@1", "id": "drop",
+             "summary": "Delete `old`", "consequence": "Unmerged commits are lost",
+             "require_typing": require}
+        ]}))
+    }
+
+    #[test]
+    fn confirm_starts_on_cancel_and_answers_its_value() {
+        let mut app = App::default();
+        app.render("c".into(), confirm(None));
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
+        let Some(Event::Answer { id, value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!((id.as_str(), value), ("drop", json!({"confirmed": false})));
+
+        app.render("c2".into(), confirm(None));
+        press(&mut app, KeyCode::Right);
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"confirmed": true}));
+
+        app.render("c3".into(), confirm(None));
+        let Some(Event::Cancel { values, .. }) = press(&mut app, KeyCode::Esc) else {
+            panic!("Esc cancels the view")
+        };
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn confirm_ignores_letter_keys_for_focus() {
+        let mut app = App::default();
+        app.render("c".into(), confirm(None));
+        for c in "hjkl".chars() {
+            assert!(press(&mut app, KeyCode::Char(c)).is_none());
+            assert_eq!(app.focused_id(), Some("drop:cancel"));
+        }
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
+    }
+
+    #[test]
+    fn confirm_waits_for_the_typed_text() {
+        let mut app = App::default();
+        app.render("c".into(), confirm(Some("old")));
+        assert_eq!(app.order, ["drop:typing", "drop:cancel", "drop:confirm"]);
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
+        press(&mut app, KeyCode::Tab);
+        assert!(!app.enabled("drop:confirm"));
+        assert!(press(&mut app, KeyCode::Enter).is_none(), "disabled");
+        press(&mut app, KeyCode::Tab);
+        for c in "ol".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        app.render("c".into(), confirm(Some("old")));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.enabled("drop:confirm"), "typing survives a re-render");
+        assert!(app.values().is_empty(), "parts are not field values");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"confirmed": true}));
+    }
+
+    fn chooser(multi: bool) -> Node {
+        let items: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .map(|v| json!({"label": v.to_uppercase(), "value": v, "preview": format!("# {v}")}))
+            .collect();
+        spec(
+            json!({"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+                    "items": items, "multi": multi}),
+        )
+    }
+
+    #[test]
+    fn chooser_answers_the_item_under_the_cursor() {
+        let mut app = App::default();
+        app.render("c".into(), chooser(false));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('J'));
+        assert!(matches!(
+            app.fields["pick"],
+            Field::Chooser { scroll: 1, .. }
+        ));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Up);
+        assert!(matches!(
+            app.fields["pick"],
+            Field::Chooser {
+                cursor: 1,
+                scroll: 0,
+                ..
+            }
+        ));
+        let Some(Event::Answer { id, value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!((id.as_str(), value), ("pick", json!({"selected": "b"})));
+    }
+
+    #[test]
+    fn chooser_answer_carries_field_values() {
+        let mut app = App::default();
+        app.render(
+            "f".into(),
+            spec(json!({"type": "box", "children": [
+                {"type": "input", "id": "note"},
+                {"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+                 "items": [{"label": "a", "preview": "A"}]}
+            ]})),
+        );
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Tab);
+        let Some(Event::Answer { value, values, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": "a"}));
+        assert_eq!(Value::Object(values), json!({"note": "x"}));
+    }
+
+    #[test]
+    fn multi_chooser_toggles_with_space() {
+        let mut app = App::default();
+        app.render("m".into(), chooser(true));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char(' '));
+        app.render("m".into(), chooser(true));
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": ["a", "c"]}), "in item order");
+
+        app.render("m2".into(), chooser(true));
+        press(&mut app, KeyCode::Down);
+        let Some(Event::Answer { value, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": ["b"]}));
     }
 
     #[test]
