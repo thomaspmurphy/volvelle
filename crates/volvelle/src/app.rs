@@ -397,12 +397,9 @@ impl App {
                         values,
                     }));
                 }
-                KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
-                    return self.move_focus(-1);
-                }
-                KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j') => {
-                    return self.move_focus(1);
-                }
+                // No letter keys: a stray keystroke must not reach Confirm.
+                KeyCode::Left | KeyCode::Up => return self.move_focus(-1),
+                KeyCode::Right | KeyCode::Down => return self.move_focus(1),
                 _ => {}
             },
         }
@@ -738,6 +735,26 @@ mod tests {
             panic!("Esc cancels the view")
         };
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn confirm_ignores_letter_keys_for_focus() {
+        let mut app = App::default();
+        app.render("c".into(), confirm(None));
+        for c in "hjkl".chars() {
+            assert!(press(&mut app, KeyCode::Char(c)).is_none());
+            assert_eq!(app.focused_id(), Some("drop:cancel"));
+        }
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focused_id(), Some("drop:confirm"));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focused_id(), Some("drop:cancel"));
     }
 
     #[test]
