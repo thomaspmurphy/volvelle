@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use volvelle_schema::{Event, Node, Request};
+use volvelle_schema::{Event, Node, PatternInfo, Request};
 
 use log::{Kind, Log};
 use session::{Monitor, Refusal};
@@ -108,12 +108,7 @@ impl Server {
         let outcome = match tool {
             "render" => self.render(args),
             "wait_event" => self.wait_event(args),
-            "close" => {
-                self.viewer.close();
-                self.monitor.closed();
-                self.log.record(Kind::Close, None, &[]);
-                Ok(json!({"status": "closed"}))
-            }
+            "close" => self.close(),
             other => Err(format!("unknown tool {other:?}")),
         };
         match outcome {
@@ -126,9 +121,14 @@ impl Server {
 
     fn render(&mut self, args: &Value) -> Result<Value, String> {
         let view = view_arg(args).inspect_err(|e| self.log_error(None, e))?;
+        self.monitor
+            .check_render(&view)
+            .map_err(|r| self.refuse(Some(&view), r))?;
         let spec = volvelle_schema::parse_spec(args["spec"].clone())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
         let interactive = has_answer(&spec);
+        let pattern = pattern_of(&spec);
+        let reports = self.monitor.owes(&view);
         let returns = volvelle_schema::result_schema(&spec);
         // Anything already queued answers an earlier render.
         for ev in self.viewer.drain() {
@@ -144,12 +144,12 @@ impl Server {
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
-        self.log.record(
-            Kind::Render,
-            Some(&view),
-            &[("spec", spec_json), ("interactive", interactive.into())],
-        );
-        self.monitor.rendered(&view, interactive);
+        let mut body = vec![("spec", spec_json), ("interactive", interactive.into())];
+        if reports {
+            body.push(("reports_outcome", true.into()));
+        }
+        self.log.record(Kind::Render, Some(&view), &body);
+        self.monitor.rendered(&view, interactive, pattern);
         Ok(if interactive {
             json!({"view": view, "returns": returns, "next": "wait_event"})
         } else {
@@ -159,14 +159,9 @@ impl Server {
 
     fn wait_event(&mut self, args: &Value) -> Result<Value, String> {
         let view = view_arg(args).inspect_err(|e| self.log_error(None, e))?;
-        self.monitor.check_wait(&view).map_err(|Refusal(why)| {
-            self.log.record(
-                Kind::Refusal,
-                Some(&view),
-                &[("message", why.clone().into())],
-            );
-            why
-        })?;
+        self.monitor
+            .check_wait(&view)
+            .map_err(|r| self.refuse(Some(&view), r))?;
         let ms = args["timeout_ms"]
             .as_u64()
             .unwrap_or(DEFAULT_WAIT_MS)
@@ -176,8 +171,11 @@ impl Server {
             match self.viewer.recv(deadline) {
                 Recv::Event(ev) => {
                     if let Some(answer) = self.monitor.accept(&view, &ev) {
-                        self.log
-                            .record(Kind::Answer, Some(&view), &[("answer", answer.clone())]);
+                        let mut body = vec![("answer", answer.clone())];
+                        if self.monitor.owes(&view) {
+                            body.push(("owes", "report_outcome".into()));
+                        }
+                        self.log.record(Kind::Answer, Some(&view), &body);
                         return Ok(answer);
                     }
                     if matches!(ev, Event::Closed) {
@@ -205,6 +203,23 @@ impl Server {
         }
     }
 
+    fn close(&mut self) -> Result<Value, String> {
+        self.monitor
+            .check_close()
+            .map_err(|r| self.refuse(None, r))?;
+        self.viewer.close();
+        self.monitor.closed();
+        self.log.record(Kind::Close, None, &[]);
+        Ok(json!({"status": "closed"}))
+    }
+
+    /// Logs a refused move and hands back its message.
+    fn refuse(&mut self, view: Option<&str>, Refusal(why): Refusal) -> String {
+        self.log
+            .record(Kind::Refusal, view, &[("message", why.clone().into())]);
+        why
+    }
+
     fn log_error(&mut self, view: Option<&str>, message: &str) {
         self.log
             .record(Kind::Error, view, &[("message", message.into())]);
@@ -222,6 +237,17 @@ fn view_arg(args: &Value) -> Result<String, String> {
 fn has_answer(spec: &Node) -> bool {
     let mut found = false;
     spec.walk(&mut |n| found |= n.id().is_some());
+    found
+}
+
+/// The spec's pattern; validation allows at most one per view.
+fn pattern_of(spec: &Node) -> Option<&'static PatternInfo> {
+    let mut found = None;
+    spec.walk(&mut |n| {
+        if let Node::Pattern(p) = n {
+            found = Some(p.info());
+        }
+    });
     found
 }
 

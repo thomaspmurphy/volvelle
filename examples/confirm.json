@@ -1,0 +1,16 @@
+{
+  "type": "box",
+  "children": [
+    {"type": "text", "text": "Cleaning up merged branches", "tone": "muted"},
+    {
+      "type": "pattern",
+      "name": "confirm-destructive@1",
+      "id": "delete",
+      "title": "Delete branch",
+      "summary": "Delete the remote branch `feat/old-login` and its **3** open preview deployments.",
+      "consequence": "Two commits are not merged anywhere else and will be lost.",
+      "confirm_label": "Delete",
+      "require_typing": "feat/old-login"
+    }
+  ]
+}

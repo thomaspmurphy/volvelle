@@ -13,7 +13,9 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Gauge, List, ListItem, ListState, Paragraph, Row,
     StatefulWidget, Table, Widget, Wrap,
 };
-use volvelle_schema::{Align, Direction, InputNode, Node, Tone};
+use volvelle_schema::{
+    Align, ButtonNode, ConfirmDestructive, Direction, InputNode, Node, Pattern, Tone,
+};
 
 use crate::app::{self, App, Field};
 use crate::markdown;
@@ -147,6 +149,15 @@ fn status_line(app: &App) -> Line<'static> {
         Line::from(hint(
             " tab next · shift-tab back · enter newline · esc cancel",
         ))
+    } else if let Some(Field::Confirm {
+        require: Some(r), ..
+    }) = app.focused_field()
+        && !app.enabled(app.focused_id().unwrap_or_default())
+    {
+        Line::from(Span::styled(
+            format!(" type {r:?} to enable · shift-tab back · esc cancel"),
+            palette::muted(),
+        ))
     } else if app.awaiting_input() {
         Line::from(hint(
             " tab next · shift-tab back · space toggle · enter confirm · esc cancel",
@@ -225,9 +236,18 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Input(_) => 3,
         Node::Select(s) => s.options.len() as u16 + 2,
         Node::Toggle(_) | Node::Button(_) | Node::Progress(_) | Node::Divider(_) => 1,
+        Node::Pattern(Pattern::ConfirmDestructive(c)) => {
+            confirm_rows(c, width).iter().sum::<u16>() + 2
+        }
         Node::Pattern(_) => 1,
     };
-    if n.id().is_some() { h.min(cap) } else { h }
+    if capped(n) { h.min(cap) } else { h }
+}
+
+/// Focusable leaves are capped at the pane so they can be shown whole. A
+/// confirm-destructive is not a leaf: its parts take focus.
+fn capped(n: &Node) -> bool {
+    n.id().is_some() && !matches!(n, Node::Pattern(Pattern::ConfirmDestructive(_)))
 }
 
 /// Height of a node once every shrink-first node inside it has given way,
@@ -548,10 +568,78 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             }
             f.render_widget(block, area);
         }
+        Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
         Node::Pattern(p) => f.render_widget(
             Paragraph::new(format!("{} is not drawn yet", p.info().name)).style(palette::muted()),
             area,
         ),
+    }
+}
+
+/// Rows inside a confirm-destructive's border: summary, consequence, a gap,
+/// the typing field if any, and the buttons.
+fn confirm_rows(c: &ConfirmDestructive, width: u16) -> [u16; 5] {
+    let inner = width.saturating_sub(2);
+    [
+        wrapped(&markdown::lines(&c.summary), inner),
+        wrapped(&text_lines(&c.consequence), inner),
+        1,
+        if c.require_typing.is_some() { 3 } else { 0 },
+        1,
+    ]
+}
+
+/// The renderer owns the safe defaults: an error-toned frame, Cancel first
+/// and focused, Confirm in the error tone and disabled until typed.
+fn confirm(f: &mut Canvas, area: Rect, c: &ConfirmDestructive, app: &App) {
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(tone(Tone::Error));
+    if let Some(t) = &c.title {
+        block = block.title(Span::styled(format!(" {t} "), Style::new().bold()));
+    }
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = confirm_rows(c, area.width).map(Constraint::Length);
+    let [summary, consequence, _, typing, row] = Layout::vertical(rows).areas(inner);
+    f.render_widget(
+        Paragraph::new(markdown::lines(&c.summary)).wrap(Wrap { trim: false }),
+        summary,
+    );
+    f.render_widget(
+        Paragraph::new(text_lines(&c.consequence))
+            .style(tone(Tone::Error).bold())
+            .wrap(Wrap { trim: false }),
+        consequence,
+    );
+    if let Some(r) = &c.require_typing {
+        let input = Node::Input(InputNode {
+            id: app::part(&c.id, "typing"),
+            label: Some(format!("Type {r:?} to confirm")),
+            placeholder: None,
+            value: String::new(),
+            secret: false,
+            multiline: false,
+        });
+        node(f, typing, &input, app);
+    }
+    let button = |name, label: &str, tone| {
+        Node::Button(ButtonNode {
+            id: app::part(&c.id, name),
+            label: label.to_string(),
+            tone,
+        })
+    };
+    let cancel = button("cancel", &c.cancel_label, Tone::Normal);
+    let confirm = button("confirm", &c.confirm_label, Tone::Error);
+    buttons(f, row, &[&cancel, &confirm], app);
+    // Keep the whole question in view while one of its parts has focus.
+    let prefix = format!("{}:", c.id);
+    if area.height <= f.cap
+        && app.focused_id().is_some_and(|id| id.starts_with(&prefix))
+        && !app.answered
+    {
+        f.focus = Some(area);
     }
 }
 
@@ -674,7 +762,14 @@ fn buttons(f: &mut Canvas, area: Rect, run: &[&Node], app: &App) {
             spans.push(Span::raw("  "));
         }
         let base = tone(b.tone);
-        let span = if app.is_focused(&b.id) {
+        let span = if !app.enabled(&b.id) {
+            let style = if app.is_focused(&b.id) {
+                Style::new().fg(Color::Black).bg(Color::DarkGray)
+            } else {
+                palette::muted()
+            };
+            Span::styled(format!("[ {} ]", b.label), style)
+        } else if app.is_focused(&b.id) {
             let bg = base.fg.unwrap_or(Color::Cyan);
             Span::styled(
                 format!("[ {} ]", b.label),
@@ -818,6 +913,46 @@ mod tests {
         let rows = screen(&mut term, &mut a);
         assert!(rows.iter().any(|r| r.contains("Description")));
         assert!(rows[29].contains("enter newline"));
+    }
+
+    #[test]
+    fn confirm_draws_safe_defaults() {
+        let mut a = app(
+            json!({"type": "pattern", "name": "confirm-destructive@1", "id": "drop",
+            "title": "Drop table", "summary": "Drop **users**", "consequence": "All rows are lost",
+            "confirm_label": "Drop", "require_typing": "users"}),
+        );
+        let mut term = Terminal::new(TestBackend::new(40, 11)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[0].contains("Drop table"), "{rows:#?}");
+        assert!(rows[1].contains("Drop users") && rows[2].contains("All rows are lost"));
+        assert!(rows[4].contains("Type \"users\" to confirm"));
+        assert!(rows[7].contains("[ Cancel ]  [ Drop ]"));
+        let buf = term.backend().buffer();
+        let at = |s: &str| rows[7].find(s).unwrap() as u16;
+        let (cancel, drop) = (&buf[(at("Cancel"), 7)], &buf[(at("Drop"), 7)]);
+        assert_eq!(cancel.bg, Color::Cyan, "focus starts on Cancel");
+        assert_eq!(
+            (drop.fg, drop.bg),
+            (Color::DarkGray, Color::Reset),
+            "disabled"
+        );
+        assert_eq!(buf[(0, 0)].fg, Color::Red);
+
+        for c in "users".chars() {
+            a.key(KeyEvent::from(KeyCode::BackTab));
+            a.key(KeyEvent::from(KeyCode::Char(c)));
+            a.key(KeyEvent::from(KeyCode::Tab));
+        }
+        a.key(KeyEvent::from(KeyCode::Tab));
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[5].contains("users"), "{rows:#?}");
+        let drop = &term.backend().buffer()[(at("Drop"), 7)];
+        assert_eq!(
+            (drop.fg, drop.bg),
+            (Color::Black, Color::Red),
+            "enabled and focused"
+        );
     }
 
     #[test]

@@ -903,6 +903,17 @@ mod tests {
     }
 
     #[test]
+    fn examples_parse() {
+        for example in [
+            include_str!("../../../examples/deploy.json"),
+            include_str!("../../../examples/long.json"),
+            include_str!("../../../examples/confirm.json"),
+        ] {
+            parse_spec(serde_json::from_str(example).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
     fn confirm_obliges_an_outcome_only_when_confirmed() {
         let after = CONFIRM_DESTRUCTIVE.after_answer;
         assert_eq!(
