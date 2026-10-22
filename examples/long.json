@@ -1,0 +1,33 @@
+{
+  "type": "box",
+  "title": "Open pull request",
+  "children": [
+    {"type": "markdown", "text": "## feat: overflow scrolling\n\nThe viewer now scrolls a spec taller than its pane so the focused field stays in view.\n\n- off-screen layout at full height\n- `↑ more` / `↓ more` in the status line\n- PageUp and PageDown scroll by hand"},
+    {"type": "table", "title": "Changes", "headers": ["File", "+", "-"], "widths": [4, 1, 1], "rows": [
+      ["crates/volvelle/src/draw.rs", "180", "40"],
+      ["crates/volvelle/src/app.rs", "120", "10"],
+      ["crates/volvelle-schema/src/lib.rs", "5", "1"]
+    ]},
+    {"type": "input", "id": "title", "label": "Title", "value": "feat: overflow scrolling and multi-line input"},
+    {"type": "input", "id": "body", "label": "Description", "multiline": true, "placeholder": "Enter for a new line, Tab to move on"},
+    {"type": "box", "direction": "row", "children": [
+      {"type": "select", "id": "base", "label": "Base", "options": ["main", "release/1.2", "release/1.1", "develop"]},
+      {"type": "select", "id": "reviewers", "label": "Reviewers", "multi": true, "options": [
+        "alice", "bob", {"label": "carol", "detail": "owner"}, "dave"
+      ]}
+    ]},
+    {"type": "select", "id": "merge", "label": "Merge strategy", "options": [
+      {"label": "Squash", "value": "squash", "detail": "one commit"},
+      {"label": "Rebase", "value": "rebase"},
+      {"label": "Merge commit", "value": "merge"}
+    ]},
+    {"type": "divider", "title": "Options"},
+    {"type": "toggle", "id": "draft", "label": "Open as draft"},
+    {"type": "toggle", "id": "auto", "label": "Auto-merge when checks pass"},
+    {"type": "toggle", "id": "delete", "label": "Delete branch after merge", "value": true},
+    {"type": "toggle", "id": "notify", "label": "Notify the channel"},
+    {"type": "progress", "label": "Checks", "value": 0.75, "tone": "success"},
+    {"type": "button", "id": "open", "label": "Open", "tone": "accent"},
+    {"type": "button", "id": "cancel", "label": "Cancel"}
+  ]
+}

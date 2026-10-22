@@ -1,0 +1,16 @@
+{
+  "type": "box",
+  "title": "Deploy",
+  "children": [
+    {"type": "text", "text": "Ship build 1842 from main?", "tone": "accent"},
+    {"type": "select", "id": "env", "label": "Environment", "options": [
+      "staging",
+      {"label": "Production", "value": "prod", "detail": "requires approval"}
+    ]},
+    {"type": "toggle", "id": "migrate", "label": "Run migrations"},
+    {"type": "input", "id": "note", "label": "Release note", "placeholder": "optional"},
+    {"type": "progress", "label": "Canary", "value": 0.4, "tone": "success"},
+    {"type": "button", "id": "go", "label": "Deploy", "tone": "accent"},
+    {"type": "button", "id": "abort", "label": "Cancel"}
+  ]
+}
