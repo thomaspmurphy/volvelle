@@ -96,6 +96,26 @@ pulls paradigm 3 forward from phase 3, without the multi-agent server.
 - Fields bound to data write the user's input back to the same pointer, so
   the answer and the state stay one thing.
 
+### 6. Diagrams
+
+Diagrams follow the same rule as every other atom: the agent describes
+structure and the viewer draws it. The agent says "these states, these
+transitions, currently here" and never places a box or an arrow. A freeform
+canvas is ruled out, since it would give validation nothing to check.
+
+- `tree` atom: nested nodes with `├──` / `└──` connectors, folding locally;
+  with an `id`, Enter answers with the node's path. Independent of the
+  pattern layer, so it can land any time.
+- `graph` atom: nodes and edges, laid out in layers (rank, reduce crossings,
+  route edges with box-drawing characters), sized for a few dozen nodes.
+  This is the largest piece.
+- `state-machine@1` pattern on the graph atom: start and end states,
+  labelled transitions, and a highlighted `current` slot. First use: draw
+  volvelle's own session types live, with the monitor's state lit up.
+- Animation is data changing (item 5): updating `current` moves the
+  highlight. A `trace` slot plays a sequence of states locally, with pause
+  and scrub. Streaming many updates needs phase 4's frame batching.
+
 ## Later
 
 - **Phase 2, rest:** replay from the log, crystallising reused UIs into named
