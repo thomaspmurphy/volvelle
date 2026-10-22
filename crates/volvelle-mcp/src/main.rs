@@ -41,8 +41,8 @@ without `:`. Buttons submit every field's value. Returns the JSON Schema of the 
 {\"type\":\"button\",\"id\":\"abort\",\"label\":\"Cancel\"}]}}";
 
 const WAIT_DESC: &str = "Wait for the user to answer a view: a button press (submit), Enter on \
-a selectable list (select), or Esc (cancel), each carrying every field's value; or a pattern's \
-typed answer (answer), whose `next` says what the agent owes. Returns \
+a selectable list (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
+says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
 
@@ -286,7 +286,7 @@ fn render_description() -> String {
     let mut out = format!(
         "{RENDER_DESC}\n\nPatterns: write {{\"type\":\"pattern\",\"name\":<name>, ...slots}} \
          wherever an atom fits, at most one per view. Slots are data, not atoms. The answer \
-         is {{\"type\":\"answer\",\"id\":<id>,\"value\":<returns>}}."
+         is {{\"type\":\"answer\",\"id\":<id>,\"value\":<returns>,\"values\":{{...}}}}."
     );
     for p in volvelle_schema::patterns() {
         out.push_str(&format!(

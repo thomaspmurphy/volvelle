@@ -676,7 +676,8 @@ pub fn result_schema(root: &Node) -> Value {
             "properties": {
                 "type": {"const": "answer"},
                 "id": {"const": p.id()},
-                "value": p.value_schema()
+                "value": p.value_schema(),
+                "values": {"$ref": "#/$defs/values"}
             }
         })),
         _ => {}
@@ -743,6 +744,7 @@ pub enum Event {
         view: String,
         id: String,
         value: Value,
+        values: Map<String, Value>,
     },
     /// The user pressed Esc.
     Cancel {
@@ -890,6 +892,7 @@ mod tests {
         .unwrap();
         let answer = &result_schema(&spec)["oneOf"][1];
         assert_eq!(answer["properties"]["type"]["const"], "answer");
+        assert_eq!(answer["properties"]["values"]["$ref"], "#/$defs/values");
         assert_eq!(answer["properties"]["id"]["const"], "pick");
         assert_eq!(
             answer["properties"]["value"]["properties"]["selected"]["items"]["enum"],

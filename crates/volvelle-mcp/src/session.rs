@@ -213,6 +213,7 @@ mod tests {
             view: view.into(),
             id: "p".into(),
             value,
+            values: Map::new(),
         }
     }
 

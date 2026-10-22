@@ -372,7 +372,12 @@ impl App {
                                 .collect()
                         };
                         let value = json!({"selected": selected});
-                        return Some(self.answer(|view, _| Event::Answer { view, id, value }));
+                        return Some(self.answer(|view, values| Event::Answer {
+                            view,
+                            id,
+                            value,
+                            values,
+                        }));
                     }
                     _ => {}
                 }
@@ -385,7 +390,12 @@ impl App {
             } => match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') if enabled => {
                     let (id, value) = (pattern.clone(), json!({"confirmed": *confirmed}));
-                    return Some(self.answer(|view, _| Event::Answer { view, id, value }));
+                    return Some(self.answer(|view, values| Event::Answer {
+                        view,
+                        id,
+                        value,
+                        values,
+                    }));
                 }
                 KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
                     return self.move_focus(-1);
@@ -790,6 +800,26 @@ mod tests {
             panic!("expected an answer")
         };
         assert_eq!((id.as_str(), value), ("pick", json!({"selected": "b"})));
+    }
+
+    #[test]
+    fn chooser_answer_carries_field_values() {
+        let mut app = App::default();
+        app.render(
+            "f".into(),
+            spec(json!({"type": "box", "children": [
+                {"type": "input", "id": "note"},
+                {"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+                 "items": [{"label": "a", "preview": "A"}]}
+            ]})),
+        );
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Tab);
+        let Some(Event::Answer { value, values, .. }) = press(&mut app, KeyCode::Enter) else {
+            panic!("expected an answer")
+        };
+        assert_eq!(value, json!({"selected": "a"}));
+        assert_eq!(Value::Object(values), json!({"note": "x"}));
     }
 
     #[test]
