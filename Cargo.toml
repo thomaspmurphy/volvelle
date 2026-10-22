@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/volvelle-schema", "crates/volvelle"]
+members = ["crates/volvelle-schema", "crates/volvelle", "crates/volvelle-mcp"]
 
 [workspace.package]
 version = "0.1.0"

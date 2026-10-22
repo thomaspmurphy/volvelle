@@ -1,0 +1,11 @@
+[package]
+name = "volvelle-mcp"
+description = "stdio MCP server exposing volvelle to coding agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+volvelle-schema.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

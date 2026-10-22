@@ -1,0 +1,220 @@
+//! Connection to the viewer, which runs in its own herdr pane. Herdr only
+//! places the pane; all UI data moves over volvelle's own socket.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, bail};
+use volvelle_schema::{Event, Request};
+
+pub struct Viewer {
+    socket: PathBuf,
+    conn: Option<Conn>,
+    /// The pane we split for the viewer, if we made one.
+    pane: Option<String>,
+}
+
+struct Conn {
+    stream: UnixStream,
+    events: Receiver<Option<Event>>,
+}
+
+pub enum Recv {
+    Event(Event),
+    Timeout,
+    /// The socket closed without a goodbye.
+    Gone,
+}
+
+impl Viewer {
+    pub fn new() -> Self {
+        let socket = std::env::var_os("VOLVELLE_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let tag = std::env::var("HERDR_PANE_ID")
+                    .map(|p| p.replace(|c: char| !c.is_ascii_alphanumeric(), "-"))
+                    .unwrap_or_else(|_| std::process::id().to_string());
+                std::env::temp_dir().join(format!("volvelle-{tag}.sock"))
+            });
+        Viewer {
+            socket,
+            conn: None,
+            pane: None,
+        }
+    }
+
+    pub fn send(&mut self, req: &Request) -> anyhow::Result<()> {
+        let mut line = serde_json::to_string(req)?;
+        line.push('\n');
+        for _ in 0..2 {
+            self.ensure()?;
+            let conn = self.conn.as_mut().expect("connected");
+            if conn.stream.write_all(line.as_bytes()).is_ok() {
+                return Ok(());
+            }
+            self.conn = None;
+        }
+        bail!("could not reach the viewer at {}", self.socket.display())
+    }
+
+    /// Takes the events that have already arrived.
+    pub fn drain(&mut self) -> Vec<Event> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        let events: Vec<Event> = conn.events.try_iter().flatten().collect();
+        if events.iter().any(|e| matches!(e, Event::Closed)) {
+            self.forget();
+        }
+        events
+    }
+
+    pub fn recv(&mut self, deadline: Instant) -> Recv {
+        let Some(conn) = &self.conn else {
+            return Recv::Gone;
+        };
+        let wait = deadline.saturating_duration_since(Instant::now());
+        match conn.events.recv_timeout(wait) {
+            Ok(Some(Event::Closed)) => {
+                self.forget();
+                Recv::Event(Event::Closed)
+            }
+            Ok(Some(ev)) => Recv::Event(ev),
+            Err(RecvTimeoutError::Timeout) => Recv::Timeout,
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                self.forget();
+                Recv::Gone
+            }
+        }
+    }
+
+    /// The viewer exited on its own, taking its pane with it.
+    fn forget(&mut self) {
+        self.conn = None;
+        self.pane = None;
+    }
+
+    pub fn close(&mut self) {
+        let _ = self
+            .conn
+            .as_mut()
+            .map(|c| c.stream.write_all(b"{\"op\":\"close\"}\n"));
+        self.conn = None;
+        if let Some(pane) = self.pane.take() {
+            // Give the viewer a moment to restore the terminal and release
+            // its herdr status, then make sure the pane is gone.
+            thread::sleep(Duration::from_millis(300));
+            let _ = Command::new("herdr")
+                .args(["pane", "close", &pane])
+                .output();
+        }
+    }
+
+    fn ensure(&mut self) -> anyhow::Result<()> {
+        if self.conn.is_some() {
+            return Ok(());
+        }
+        // A viewer may already be listening: ours from earlier, or one the
+        // user started by hand.
+        if let Ok(stream) = UnixStream::connect(&self.socket) {
+            self.conn = Some(Conn::new(stream)?);
+            return Ok(());
+        }
+        self.spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(stream) = UnixStream::connect(&self.socket) {
+                self.conn = Some(Conn::new(stream)?);
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        bail!(
+            "the viewer did not start listening on {}",
+            self.socket.display()
+        )
+    }
+
+    fn spawn(&mut self) -> anyhow::Result<()> {
+        let inside = std::env::var("HERDR_ENV").is_ok_and(|v| v == "1");
+        let (true, Ok(origin)) = (inside, std::env::var("HERDR_PANE_ID")) else {
+            bail!(
+                "not inside herdr, so volvelle cannot open a pane. Ask the user to run `{} view --socket {}` in another terminal, then retry",
+                viewer_bin(),
+                self.socket.display()
+            );
+        };
+        let focus = if std::env::var("VOLVELLE_FOCUS").is_ok_and(|v| v == "1") {
+            "--focus"
+        } else {
+            "--no-focus"
+        };
+        let out = Command::new("herdr")
+            .args(["pane", "split", &origin, "--direction", "right", focus])
+            .output()
+            .context("running herdr pane split")?;
+        let reply: serde_json::Value = serde_json::from_slice(&out.stdout).with_context(|| {
+            format!("herdr pane split: {}", String::from_utf8_lossy(&out.stderr))
+        })?;
+        let Some(pane) = reply["result"]["pane"]["pane_id"].as_str() else {
+            bail!("herdr pane split returned no pane: {reply}");
+        };
+        let cmd = format!(
+            "exec {} view --socket {}",
+            shell_quote(&viewer_bin()),
+            shell_quote(&self.socket.to_string_lossy())
+        );
+        let status = Command::new("herdr")
+            .args(["pane", "run", pane, &cmd])
+            .status()?;
+        if !status.success() {
+            bail!("herdr pane run failed in pane {pane}");
+        }
+        let _ = Command::new("herdr")
+            .args(["pane", "rename", pane, "volvelle"])
+            .output();
+        self.pane = Some(pane.to_string());
+        Ok(())
+    }
+}
+
+impl Conn {
+    fn new(stream: UnixStream) -> anyhow::Result<Self> {
+        let reader = BufReader::new(stream.try_clone()?);
+        let (tx, events) = mpsc::channel();
+        thread::spawn(move || {
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(ev) = serde_json::from_str::<Event>(&line)
+                    && tx.send(Some(ev)).is_err()
+                {
+                    return;
+                }
+            }
+            let _ = tx.send(None);
+        });
+        Ok(Conn { stream, events })
+    }
+}
+
+/// The viewer binary: `VOLVELLE_BIN`, else next to this executable, else PATH.
+fn viewer_bin() -> String {
+    if let Ok(bin) = std::env::var("VOLVELLE_BIN") {
+        return bin;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("volvelle")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "volvelle".into())
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}

@@ -1722,6 +1722,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "volvelle-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "volvelle-schema",
+]
+
+[[package]]
 name = "volvelle-schema"
 version = "0.1.0"
 dependencies = [
