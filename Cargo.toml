@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/volvelle-schema"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/thomaspmurphy/volvelle"
+
+[workspace.dependencies]
+volvelle-schema = { path = "crates/volvelle-schema" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.2"
+ratatui = "0.30"
+crossterm = "0.29"
+clap = { version = "4", features = ["derive"] }
