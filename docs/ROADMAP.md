@@ -125,9 +125,10 @@ canvas is ruled out, since it would give validation nothing to check.
 - `tree` atom: nested nodes with `├──` / `└──` connectors, folding locally;
   with an `id`, Enter answers with the node's path. Independent of the
   pattern layer, so it can land any time.
-- `graph` atom: nodes and edges, laid out in layers (rank, reduce crossings,
-  route edges with box-drawing characters), sized for a few dozen nodes.
-  This is the largest piece.
+- Done: `graph` atom: nodes and edges, laid out in layers (rank, reduce
+  crossings, route edges with box-drawing characters), sized for a few dozen
+  nodes. `current` highlights a node and binds, so `update` moves it; with
+  an `id`, arrows move a focus marker and Enter answers with the node id.
 - `state-machine@1` pattern on the graph atom: start and end states,
   labelled transitions, and a highlighted `current` slot. First use: draw
   volvelle's own session types live, with the monitor's state lit up.

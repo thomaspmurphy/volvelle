@@ -79,7 +79,7 @@ exactly that shape:
  "values": {"env": "prod", "migrate": true, "note": "fix login"}}
 ```
 
-Other answers are `select` (Enter on a list or tree with an id), `cancel` (Esc) and
+Other answers are `select` (Enter on a list, tree or graph with an id), `cancel` (Esc) and
 `answer` (a pattern's typed value, see below). A view with no fields or
 buttons is display-only and cannot be waited on.
 
@@ -114,6 +114,7 @@ at /children/1: confirm-destructive@1 must be the only interactive element in it
 | `table` | `headers`, `rows`, optional `widths` | an array of rows of strings |
 | `list` | `items`; selectable with an `id` | an array of strings or `{label, value?, detail?}` |
 | `tree` | nested `nodes`; selectable with an `id` | |
+| `graph` | `nodes` and `edges`, `direction`, a highlighted `current` node; selectable with an `id` | the `current` node's id |
 | `input` | `value`, `label`, `placeholder`, `secret`, `multiline` | a string, written back |
 | `select` | `options`, `value`, `multi` | a single select's chosen value, written back |
 | `toggle` | `value` and `label` | a boolean, written back |
@@ -201,6 +202,28 @@ the node's value; without one it is display-only. With `leaves_only: true`
 only nodes without children answer, and Enter on a node with children folds
 or unfolds it. See `examples/tree.json`.
 
+A `graph` holds `nodes`, each an `id` with an optional `label` (the id by
+default) and `tone`, and `edges`, each `from` and `to` a node id with an
+optional `label`. The agent never places anything: the viewer lays the graph
+out in layers, `down` by default or `right`, and draws it with box-drawing
+lines and arrowheads. Edges that close a cycle run back up the side, a
+self-loop is a `↺` marker beside its node, and edge labels sit beside their
+edge. Node ids must be unique and every edge must name existing nodes;
+self-loops and parallel edges are fine. A graph holds at most 64 nodes and
+256 edges, which suits state machines and small dependency graphs. `current`
+names a node to highlight in the accent colour, and binding it instead makes
+`update` move the highlight:
+
+```json
+{"view": "deploy", "patch": [{"op": "replace", "path": "/state", "value": "verify"}]}
+```
+
+A graph larger than its pane shrinks like a selectable list and pans to
+follow the focus marker. With an `id` the graph is selectable and Enter
+answers `select` with the node's id; without one it is display-only. See
+`examples/graph.json`, volvelle's own view lifecycle, and
+`examples/deps.json`.
+
 ## Saved views
 
 The human decides first which views are worth keeping. Ctrl-S on any view,
@@ -271,7 +294,9 @@ so reuse shows up there. Render records carry the view's `data`, and each
 Tab and Shift-Tab move focus. Space toggles. Enter confirms or presses, and
 inserts a newline in a multi-line input. In a tree, Up and Down (or j and k)
 move, Right (l) unfolds or steps into a node, Left (h) folds or steps out to
-the parent, and Space toggles a fold. PageUp and PageDown scroll a view
+the parent, and Space toggles a fold. In a graph, the arrows (or h, j, k and l) move the
+focus marker to the nearest node that way, and the view pans to keep it in
+sight. PageUp and PageDown scroll a view
 taller than the pane; J and K (or Shift-Up and Shift-Down) scroll a long
 preview. Esc cancels. Ctrl-S saves the view to a library. Ctrl-C closes the
 viewer.
