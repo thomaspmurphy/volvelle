@@ -1371,6 +1371,34 @@ mod tests {
         assert_eq!(edges.len(), 5);
         assert_eq!(g.ids(), ["queued", "running", "done", "failed"]);
 
+        let mut parallel = machine();
+        parallel["transitions"] = json!([
+            {"from": "queued", "to": "running", "label": "pick"},
+            {"from": "running", "to": "done"},
+            {"from": "queued", "to": "running"},
+            {"from": "running", "to": "failed", "label": "error"},
+            {"from": "queued", "to": "running", "label": "retry"},
+            {"from": "running", "to": "done", "label": "ok"},
+            {"from": "running", "to": "failed", "label": "timeout"}
+        ]);
+        let Node::Graph(g) = expand(&parse_spec(parallel).unwrap()) else {
+            panic!("expected a graph")
+        };
+        let merged: Vec<(&str, &str, Option<&str>)> = g
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_deref()))
+            .collect();
+        assert_eq!(
+            merged,
+            [
+                ("", "queued", None),
+                ("queued", "running", Some("pick, retry")),
+                ("running", "done", Some("ok")),
+                ("running", "failed", Some("error, timeout")),
+            ]
+        );
+
         let Node::Graph(lit) = expand(&parse_spec(machine()).unwrap()) else {
             panic!("expected a graph")
         };

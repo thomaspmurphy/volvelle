@@ -200,7 +200,8 @@ the item under the cursor without a round trip to the agent. See
 the states, the `start` state, any `end` states and the labelled
 transitions, and the viewer lays them out: a small `●` entry point leads to
 `start`, end states carry a `◉` after their label, and `current` is lit in
-the accent colour. Bind `current` instead and `update` moves the light, as
+the accent colour. Transitions between the same two states share one edge,
+their labels joined with commas. Bind `current` instead and `update` moves the light, as
 with a graph:
 
 ```json

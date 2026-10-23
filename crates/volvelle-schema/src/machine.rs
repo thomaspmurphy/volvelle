@@ -59,7 +59,8 @@ impl StateMachine {
     }
 
     /// The graph it draws: an inert entry point leading to `start`, end
-    /// states marked, and `current` or `bind` passed through.
+    /// states marked, transitions between the same two states merged into
+    /// one edge, and `current` or `bind` passed through.
     pub fn graph(&self) -> GraphNode {
         let entry = Vertex {
             id: ENTRY.into(),
@@ -84,9 +85,7 @@ impl StateMachine {
             title: self.title.clone(),
             direction: self.direction,
             nodes: std::iter::once(entry).chain(states).collect(),
-            edges: std::iter::once(start)
-                .chain(self.transitions.iter().cloned())
-                .collect(),
+            edges: std::iter::once(start).chain(self.merged()).collect(),
             current: self.current.clone(),
             bind: self.bind.clone(),
         }
@@ -216,6 +215,26 @@ impl StateMachine {
                         &[&format!("a transition into {:?}", s.id), "no such state"],
                     ));
                 }
+            }
+        }
+        out
+    }
+
+    /// One edge per pair of states, in order of first use, its labels
+    /// joined with commas in input order.
+    fn merged(&self) -> Vec<Edge> {
+        let mut out: Vec<Edge> = Vec::new();
+        for t in &self.transitions {
+            match out.iter_mut().find(|e| e.from == t.from && e.to == t.to) {
+                Some(e) => {
+                    if let Some(l) = &t.label {
+                        e.label = Some(match e.label.take() {
+                            Some(prev) => format!("{prev}, {l}"),
+                            None => l.clone(),
+                        });
+                    }
+                }
+                None => out.push(t.clone()),
             }
         }
         out
