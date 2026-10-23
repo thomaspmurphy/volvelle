@@ -72,6 +72,8 @@ struct Server {
     library: Library,
     /// The spec last rendered under each view id, for `save`.
     rendered: HashMap<String, Node>,
+    /// The data document each bound view reads, as the viewer holds it.
+    data: HashMap<String, Value>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,6 +86,7 @@ fn main() -> anyhow::Result<()> {
         monitor: Monitor::default(),
         log: Log::from_env(),
         rendered: HashMap::new(),
+        data: HashMap::new(),
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -160,10 +163,14 @@ impl Server {
             .map_err(|r| self.refuse(Some(&view), r))?;
         let (spec, saved) =
             spec_arg(&self.library, args).inspect_err(|e| self.log_error(Some(&view), e))?;
+        let data = data_arg(args).inspect_err(|e| self.log_error(Some(&view), e))?;
+        let shown = volvelle_schema::bind(&spec, data.as_ref())
+            .map_err(|e| format!("invalid data: {e}"))
+            .inspect_err(|e| self.log_error(Some(&view), e))?;
         let interactive = has_answer(&spec);
         let pattern = pattern_of(&spec);
         let reports = self.monitor.owes(&view);
-        let returns = volvelle_schema::result_schema(&spec);
+        let returns = returns(&shown, has_binds(&spec));
         // Anything already queued answers an earlier render.
         for ev in self.viewer.drain() {
             match ev {
@@ -177,12 +184,21 @@ impl Server {
             .send(&Request::Render {
                 view: view.clone(),
                 spec: spec.clone(),
-                data: None,
+                data: data.clone(),
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
         self.rendered.insert(view.clone(), spec);
         let mut body = vec![("spec", spec_json), ("interactive", interactive.into())];
+        match data {
+            Some(data) => {
+                body.push(("data", data.clone()));
+                self.data.insert(view.clone(), data);
+            }
+            None => {
+                self.data.remove(&view);
+            }
+        }
         if reports {
             body.push(("reports_outcome", true.into()));
         }
@@ -472,6 +488,37 @@ fn spec_arg(library: &Library, args: &Value) -> Result<(Node, Option<String>), S
     }
 }
 
+/// The optional data document for a spec's binds, which must be an object.
+fn data_arg(args: &Value) -> Result<Option<Value>, String> {
+    match args.get("data").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(data @ Value::Object(_)) => Ok(Some(data.clone())),
+        Some(_) => Err(
+            "`data` must be a JSON object; allowed: an object such as {\"hero\": {\"hp\": 0.5}}"
+                .into(),
+        ),
+    }
+}
+
+/// Whether any atom in the spec binds into data.
+fn has_binds(spec: &Node) -> bool {
+    let mut found = false;
+    spec.walk(&mut |n| found |= n.bind().is_some());
+    found
+}
+
+/// The answer's schema for a spec as drawn. A bound view's answers also
+/// carry `data`, so each variant gains it.
+fn returns(shown: &Node, bound: bool) -> Value {
+    let mut schema = volvelle_schema::result_schema(shown);
+    if bound {
+        for variant in schema["oneOf"].as_array_mut().into_iter().flatten() {
+            variant["properties"]["data"] = json!({"type": "object"});
+        }
+    }
+    schema
+}
+
 /// Whether anything in the spec can produce an answer.
 fn has_answer(spec: &Node) -> bool {
     let mut found = false;
@@ -614,7 +661,8 @@ fn render_schema() -> Value {
         "properties": {
             "view": {"type": "string", "description": "Names this view. Reuse it to update the view in place."},
             "spec": {"$ref": "#/$defs/Node"},
-            "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."}
+            "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."},
+            "data": {"type": "object", "description": "The document the spec's `bind` pointers read. Required when the spec binds."}
         },
         "required": ["view"],
         "$defs": defs
@@ -718,6 +766,7 @@ mod tests {
             log: Log::new(root.join("log"), None),
             library: library(&root),
             rendered: HashMap::new(),
+            data: HashMap::new(),
         };
         let text = |v: &Value| v["content"][0]["text"].as_str().unwrap().to_string();
 
@@ -790,6 +839,7 @@ mod tests {
             log: Log::new(root.join("log"), None),
             library,
             rendered: HashMap::new(),
+            data: HashMap::new(),
         };
         (server, fake)
     }
@@ -966,6 +1016,133 @@ mod tests {
         );
         let (_, _, entry) = server.library.load("menu").unwrap();
         assert_eq!(entry.spec["text"], "two");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server whose fake viewer answers its i-th request with the lines
+    /// in `replies[i]`, then hands back every request it took.
+    fn scripted(
+        root: &std::path::Path,
+        replies: Vec<Vec<Value>>,
+    ) -> (Server, std::thread::JoinHandle<Vec<Value>>) {
+        fs::create_dir_all(root).unwrap();
+        let socket = root.join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let fake = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+            let mut w = stream;
+            let mut requests = Vec::new();
+            for reply in replies {
+                let line = lines.next().unwrap().unwrap();
+                requests.push(serde_json::from_str(&line).unwrap());
+                for ev in reply {
+                    writeln!(w, "{ev}").unwrap();
+                }
+            }
+            requests
+        });
+        let server = Server {
+            viewer: Viewer::at(socket, None),
+            monitor: Monitor::default(),
+            log: Log::new(root.join("log"), None),
+            library: library(root),
+            rendered: HashMap::new(),
+            data: HashMap::new(),
+        };
+        (server, fake)
+    }
+
+    fn hero() -> Value {
+        json!({"type": "box", "title": "Hero", "children": [
+            {"type": "progress", "label": "HP", "bind": "/hp"},
+            {"type": "input", "id": "name", "label": "Name", "bind": "/name"},
+            {"type": "list", "id": "bag", "bind": "/bag"},
+            {"type": "button", "id": "ok", "label": "OK"}
+        ]})
+    }
+
+    fn hero_data() -> Value {
+        json!({"hp": 0.5, "name": "Ada", "bag": ["rope", "map"]})
+    }
+
+    #[test]
+    fn a_saved_template_renders_with_data() {
+        let root = temp("bind-render");
+        let (mut server, fake) = scripted(&root, vec![vec![]]);
+        let spec = volvelle_schema::parse_spec(hero()).unwrap();
+        let origin = Origin {
+            view: String::new(),
+            pane: None,
+            by: By::Agent,
+        };
+        let lib = &server.library;
+        lib.save(Scope::User, &Entry::new("hero", &spec, origin))
+            .unwrap();
+
+        let args = json!({"view": "h", "saved": "hero", "data": hero_data()});
+        let rendered = reply(&server.call("render", &args)).unwrap();
+        let variants = rendered["returns"]["oneOf"].as_array().unwrap();
+        assert!(
+            variants
+                .iter()
+                .all(|v| v["properties"]["data"] == json!({"type": "object"}))
+        );
+        assert_eq!(
+            variants[2]["properties"]["value"]["enum"],
+            json!(["rope", "map"]),
+            "a bound list's items reach the answer's type"
+        );
+        let requests = fake.join().unwrap();
+        assert_eq!(requests[0]["data"], hero_data());
+        assert_eq!(requests[0]["spec"]["children"][1]["bind"], "/name");
+        assert_eq!(server.data["h"], hero_data());
+
+        let render = records(&root)
+            .into_iter()
+            .find(|r| r["kind"] == "render")
+            .unwrap();
+        assert_eq!(
+            (&render["saved"], &render["data"]),
+            (&json!("hero"), &hero_data())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn binds_are_checked_against_data_before_rendering() {
+        let root = temp("bind-refuse");
+        let (mut server, _fake) = scripted(&root, vec![vec![]]);
+        let refused =
+            |server: &mut Server, args: Value| reply(&server.call("render", &args)).unwrap_err();
+        assert_eq!(
+            refused(&mut server, json!({"view": "h", "spec": hero()})),
+            "invalid data: at /children/0/bind: the spec binds 3 pointers but render has no \
+             `data`; allowed: `data` with a document, literals instead of binds"
+        );
+        assert_eq!(
+            refused(
+                &mut server,
+                json!({"view": "h", "spec": hero(), "data": [1]})
+            ),
+            "`data` must be a JSON object; allowed: an object such as {\"hero\": {\"hp\": 0.5}}"
+        );
+        let data = json!({"hp": 2, "name": "Ada", "bag": []});
+        assert_eq!(
+            refused(
+                &mut server,
+                json!({"view": "h", "spec": hero(), "data": data})
+            ),
+            "invalid data: at /children/0/bind: bind \"/hp\" holds 2, but progress needs a \
+             number from 0.0 to 1.0; allowed: a number from 0.0 to 1.0"
+        );
+        assert!(server.data.is_empty() && server.rendered.is_empty());
+        let plain = json!({"view": "p", "spec": {"type": "text", "text": "hi"}, "data": {"a": 1}});
+        let shown = reply(&server.call("render", &plain)).unwrap();
+        assert_eq!(
+            shown["display_only"], true,
+            "data without binds is harmless"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
