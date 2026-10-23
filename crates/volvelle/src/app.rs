@@ -631,8 +631,8 @@ fn start(spec: &Node, order: &[String]) -> Option<usize> {
 fn init(node: &Node) -> Field {
     match node {
         Node::Input(n) => Field::Text {
-            cursor: n.value.chars().count(),
-            value: n.value.clone(),
+            cursor: n.value().chars().count(),
+            value: n.value().to_string(),
             top: 0,
             multiline: n.multiline,
         },
@@ -653,11 +653,15 @@ fn init(node: &Node) -> Field {
                 multi: n.multi,
             }
         }
-        Node::Toggle(n) => Field::Toggle(n.value),
+        Node::Toggle(n) => Field::Toggle(n.value()),
         Node::Tree(n) => Field::Tree(TreeState::new(n)),
         Node::List(n) => Field::List {
             cursor: 0,
-            values: n.items.iter().map(|i| Item::value(i).to_string()).collect(),
+            values: n
+                .items()
+                .iter()
+                .map(|i| Item::value(i).to_string())
+                .collect(),
         },
         _ => Field::Button,
     }

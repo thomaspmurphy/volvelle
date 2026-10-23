@@ -302,17 +302,17 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
             };
             body + chrome
         }
-        Node::Text(t) => wrapped(&text_lines(&t.text), width),
-        Node::Markdown(m) => wrapped(&markdown::lines(&m.text), width),
-        Node::Table(t) => t.rows.len() as u16 + 3,
-        Node::List(l) => l.items.len().max(1) as u16 + 2,
+        Node::Text(t) => wrapped(&text_lines(t.text()), width),
+        Node::Markdown(m) => wrapped(&markdown::lines(m.text()), width),
+        Node::Table(t) => t.rows().len() as u16 + 3,
+        Node::List(l) => l.items().len().max(1) as u16 + 2,
         Node::Tree(t) => {
             tree::rows(t, app).0.len().max(1) as u16 + if t.title.is_some() { 2 } else { 0 }
         }
         Node::Input(i) if i.multiline => {
             let lines = match app.fields.get(&i.id) {
                 Some(Field::Text { value, .. }) => value.split('\n').count(),
-                _ => i.value.split('\n').count(),
+                _ => i.value().split('\n').count(),
             };
             (lines as u16).clamp(TEXT_ROWS.0, TEXT_ROWS.1) + 2
         }
@@ -522,7 +522,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             if t.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let p = Paragraph::new(Text::from(text_lines(&t.text)))
+            let p = Paragraph::new(Text::from(text_lines(t.text())))
                 .style(style)
                 .alignment(align)
                 .wrap(Wrap { trim: false });
@@ -530,7 +530,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         }
         Node::Markdown(m) => {
             f.render_widget(
-                Paragraph::new(markdown::lines(&m.text)).wrap(Wrap { trim: false }),
+                Paragraph::new(markdown::lines(m.text())).wrap(Wrap { trim: false }),
                 area,
             );
         }
@@ -542,7 +542,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
             let header = Row::new(t.headers.iter().map(|h| Cell::from(h.clone())))
                 .style(Style::new().bold().fg(Color::Cyan));
             let rows = t
-                .rows
+                .rows()
                 .iter()
                 .map(|r| Row::new(r.iter().map(|c| Cell::from(c.clone()))));
             let table = Table::new(rows, widths)
@@ -554,7 +554,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         Node::List(l) => {
             let focused = l.id.as_deref().is_some_and(|id| app.is_focused(id));
             let items: Vec<ListItem> = l
-                .items
+                .items()
                 .iter()
                 .map(|i| {
                     let mut spans = vec![Span::raw(i.label().to_string())];
@@ -659,14 +659,14 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         }
         Node::Button(_) => buttons(f, area, &[n], app),
         Node::Progress(p) => {
-            let pct = (p.value * 100.0).round();
+            let pct = (p.value() * 100.0).round();
             let label = match &p.label {
                 Some(l) => format!("{l} {pct}%"),
                 None => format!("{pct}%"),
             };
             let color = tone(p.tone).fg.unwrap_or(Color::Cyan);
             let gauge = Gauge::default()
-                .ratio(p.value.clamp(0.0, 1.0))
+                .ratio(p.value().clamp(0.0, 1.0))
                 .label(label)
                 .gauge_style(Style::new().fg(color).bg(Color::Black));
             f.render_widget(gauge, Rect { height: 1, ..area });
@@ -804,7 +804,8 @@ fn confirm(f: &mut Canvas, area: Rect, c: &ConfirmDestructive, app: &App) {
             id: app::part(&c.id, "typing"),
             label: Some(format!("Type {r:?} to confirm")),
             placeholder: None,
-            value: String::new(),
+            value: None,
+            bind: None,
             secret: false,
             multiline: false,
         });
