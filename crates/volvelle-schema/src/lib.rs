@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 mod bind;
+mod graph;
 pub mod library;
 mod patch;
 mod tree;
 pub use bind::{bind, check_binds, resolve, write_back};
+pub use graph::{Edge, Flow, GraphNode, MAX_EDGES, MAX_NODES, Vertex};
 pub use patch::{Op, apply_patch, touches};
 pub use tree::{Flat, TreeItem, TreeNode};
 
@@ -39,6 +41,10 @@ pub enum Node {
     /// Nested items that fold. With an `id` it is selectable and Enter emits
     /// a `select` event.
     Tree(TreeNode),
+    /// Nodes and edges, laid out and drawn by the viewer, with an optional
+    /// highlighted node. With an `id` it is selectable and Enter emits a
+    /// `select` event.
+    Graph(GraphNode),
     /// A text field, single-line unless `multiline`.
     Input(InputNode),
     /// Pick one option, or several with `multi`.
@@ -479,6 +485,7 @@ impl Node {
         match self {
             Node::List(n) => n.id.as_deref(),
             Node::Tree(n) => n.id.as_deref(),
+            Node::Graph(n) => n.id.as_deref(),
             Node::Input(n) => Some(&n.id),
             Node::Select(n) => Some(&n.id),
             Node::Toggle(n) => Some(&n.id),
@@ -499,6 +506,7 @@ impl Node {
             Node::Select(n) => n.bind.as_deref(),
             Node::Toggle(n) => n.bind.as_deref(),
             Node::Progress(n) => n.bind.as_deref(),
+            Node::Graph(n) => n.bind.as_deref(),
             _ => None,
         }
     }
@@ -662,6 +670,7 @@ pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
                     errors.push(Violation::new(format!("{path}{at}"), rule, allowed));
                 }
             }
+            Node::Graph(g) => errors.extend(g.problems(path)),
             _ => {}
         }
     });
@@ -762,6 +771,9 @@ pub fn result_schema(root: &Node) -> Value {
             let values: Vec<&str> = answers.iter().map(String::as_str).collect();
             lists.push(select_variant(id, &values));
         }
+        Node::Graph(g @ GraphNode { id: Some(id), .. }) => {
+            lists.push(select_variant(id, &g.ids()));
+        }
         Node::Pattern(p) => answers.push(json!({
             "type": "object",
             "properties": {
@@ -795,7 +807,7 @@ pub fn result_schema(root: &Node) -> Value {
     })
 }
 
-/// The `select` answer of a list or tree, whose value is one of `values`.
+/// The `select` answer of a list, tree or graph, whose value is one of `values`.
 fn select_variant(id: &str, values: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -847,7 +859,7 @@ pub enum Event {
         button: String,
         values: Map<String, Value>,
     },
-    /// Enter was pressed on a selectable list item or tree node.
+    /// Enter was pressed on a selectable list item, tree node or graph node.
     Select {
         view: String,
         id: String,
@@ -1140,5 +1152,87 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.starts_with("at /children/0/nodes: selectable tree has no nodes; allowed: "));
+    }
+
+    fn graph() -> Value {
+        json!({"type": "graph", "id": "state", "nodes": [
+            {"id": "idle"}, {"id": "busy", "label": "Busy", "tone": "warning"}, {"id": "done"}
+        ], "edges": [
+            {"from": "idle", "to": "busy", "label": "start"},
+            {"from": "busy", "to": "busy"},
+            {"from": "busy", "to": "idle"},
+            {"from": "busy", "to": "done"}
+        ], "current": "busy"})
+    }
+
+    #[test]
+    fn graphs_parse_with_defaults_and_answer_with_node_ids() {
+        let Node::Graph(g) = parse_spec(graph()).unwrap() else {
+            panic!("expected a graph")
+        };
+        assert_eq!(g.direction, Flow::Down);
+        assert_eq!(g.nodes[0].label(), "idle");
+        assert_eq!(g.nodes[1].label(), "Busy");
+        let schema = result_schema(&Node::Graph(g));
+        let select = &schema["oneOf"][1]["properties"];
+        assert_eq!(select["type"]["const"], "select");
+        assert_eq!(select["id"]["const"], "state");
+        assert_eq!(select["value"]["enum"], json!(["idle", "busy", "done"]));
+
+        let mut display = graph();
+        display.as_object_mut().unwrap().remove("id");
+        display["direction"] = json!("right");
+        let schema = result_schema(&parse_spec(display).unwrap());
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_bad_graphs() {
+        let spec = json!({"type": "box", "children": [{"type": "graph", "nodes": [
+            {"id": "a"}, {"id": ""}, {"id": "a"}, {"id": "b"}
+        ], "edges": [
+            {"from": "a", "to": "b"},
+            {"from": "c", "to": "a"},
+            {"from": "b", "to": "d", "label": "x"}
+        ], "current": "e"}]});
+        let text: Vec<String> = errors(spec).iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /children/0/nodes/1/id: graph node id is empty; allowed: a short name such as \"idle\"",
+                "at /children/0/nodes/2/id: graph node id \"a\" is not unique, first used at /children/0/nodes/0; allowed: a distinct \"id\" on this node",
+                "at /children/0/edges/1/from: edge from \"c\" names no node of the graph; allowed: \"a\", \"b\"",
+                "at /children/0/edges/2/to: edge to \"d\" names no node of the graph; allowed: \"a\", \"b\"",
+                "at /children/0/current: current \"e\" names no node of the graph; allowed: \"a\", \"b\"",
+            ]
+        );
+
+        let many: Vec<Value> = (0..=MAX_NODES)
+            .map(|i| json!({"id": format!("n{i}")}))
+            .collect();
+        let edges: Vec<Value> = (0..=MAX_EDGES)
+            .map(|_| json!({"from": "n0", "to": "n1"}))
+            .collect();
+        let big = errors(json!({"type": "graph", "nodes": many, "edges": edges}));
+        let text: Vec<String> = big.iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /nodes: graph has 65 nodes, more than 64; allowed: at most 64 nodes, several smaller graphs",
+                "at /edges: graph has 257 edges, more than 256; allowed: at most 256 edges, several smaller graphs",
+            ]
+        );
+
+        let empty = json!({"type": "graph", "id": "g", "nodes": []});
+        assert!(
+            parse_spec(empty)
+                .unwrap_err()
+                .contains("selectable graph has no nodes")
+        );
+        parse_spec(json!({"type": "graph", "nodes": []})).unwrap();
+        let unknown = json!({"type": "graph", "nodes": [{"id": "a", "shape": "circle"}]});
+        assert!(parse_spec(unknown).is_err());
+        let direction = json!({"type": "graph", "direction": "up", "nodes": []});
+        assert!(parse_spec(direction).is_err());
     }
 }

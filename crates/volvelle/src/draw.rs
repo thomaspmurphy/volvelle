@@ -319,6 +319,8 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Input(_) => 3,
         Node::Select(s) => s.options.len() as u16 + 2,
         Node::Toggle(_) | Node::Button(_) | Node::Progress(_) | Node::Divider(_) => 1,
+        // Drawn once the viewer lays graphs out.
+        Node::Graph(_) => 0,
         Node::Pattern(Pattern::ConfirmDestructive(c)) => {
             confirm_rows(c, width).iter().sum::<u16>() + 2
         }
@@ -682,6 +684,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         }
         Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
         Node::Pattern(Pattern::ChooseWithPreview(c)) => chooser(f, area, c, app),
+        Node::Graph(_) => {}
     }
 }
 
