@@ -19,6 +19,8 @@ pub enum Kind {
     Refusal,
     Error,
     Close,
+    /// The user saved a view with Ctrl-S.
+    Saved,
 }
 
 impl Kind {
@@ -31,6 +33,7 @@ impl Kind {
             Kind::Refusal => "refusal",
             Kind::Error => "error",
             Kind::Close => "close",
+            Kind::Saved => "saved",
         }
     }
 }

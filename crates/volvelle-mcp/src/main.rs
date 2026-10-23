@@ -10,6 +10,7 @@ use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use volvelle_schema::library::Library;
 use volvelle_schema::{Event, Node, PatternInfo, Request};
 
 use log::{Kind, Log};
@@ -26,7 +27,8 @@ a typed function call: `render` returns the shape the answer will take, and `wai
 returns exactly that shape. Protocol per view: render, then any number of re-renders (each \
 keeps what the user has entered), then one wait_event that returns the answer. A view with no \
 fields or buttons is display-only and cannot be waited on. Prefer a pattern when one fits: \
-it carries safe defaults and its own protocol.";
+it carries safe defaults and its own protocol. The user can save any view with Ctrl-S; \
+`library` lists saved views, and `render` with `saved` brings one back.";
 
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
@@ -34,7 +36,8 @@ a new `view` name replaces the old one. Atoms: box (row/column, optional border/
 (tone, bold, align), markdown, table, list (selectable with an id), tree (nested nodes that \
 fold, selectable with an id; a node's value defaults to its label path joined with /), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
-unique ids without `:`. Buttons submit every field's value. Returns the JSON Schema of the \
+unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
+`saved`, the name of a view the user saved (see `library`). Returns the JSON Schema of the \
 eventual answer.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
@@ -48,15 +51,25 @@ says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
 
+const LIBRARY_DESC: &str = "List the views the user saved with Ctrl-S: name, scope (project \
+or user; project entries shadow user ones), a one-line summary, when and from which view. With \
+`name`, return that entry in full, including its `spec`, to adapt it or to render it with \
+`saved`.";
+
 struct Server {
     viewer: Viewer,
     monitor: Monitor,
     log: Log,
+    library: Library,
 }
 
 fn main() -> anyhow::Result<()> {
+    // Claude Code starts the server in the project, so that is where the
+    // project library lives.
+    let project = std::env::current_dir().ok();
     let mut server = Server {
-        viewer: Viewer::new(),
+        library: Library::from_env(project.as_deref()),
+        viewer: Viewer::new(project),
         monitor: Monitor::default(),
         log: Log::from_env(),
     };
@@ -109,10 +122,14 @@ impl Server {
     }
 
     fn call(&mut self, tool: &str, args: &Value) -> Value {
+        for ev in self.viewer.saved() {
+            self.log_saved(&ev);
+        }
         let outcome = match tool {
             "render" => self.render(args),
             "wait_event" => self.wait_event(args),
             "close" => self.close(),
+            "library" => self.library(args),
             other => Err(format!("unknown tool {other:?}")),
         };
         match outcome {
@@ -128,16 +145,18 @@ impl Server {
         self.monitor
             .check_render(&view)
             .map_err(|r| self.refuse(Some(&view), r))?;
-        let spec = volvelle_schema::parse_spec(args["spec"].clone())
-            .inspect_err(|e| self.log_error(Some(&view), e))?;
+        let (spec, saved) =
+            spec_arg(&self.library, args).inspect_err(|e| self.log_error(Some(&view), e))?;
         let interactive = has_answer(&spec);
         let pattern = pattern_of(&spec);
         let reports = self.monitor.owes(&view);
         let returns = volvelle_schema::result_schema(&spec);
         // Anything already queued answers an earlier render.
         for ev in self.viewer.drain() {
-            if matches!(ev, Event::Closed) {
-                self.monitor.closed();
+            match ev {
+                Event::Closed => self.monitor.closed(),
+                Event::Saved { .. } => self.log_saved(&ev),
+                _ => {}
             }
         }
         let spec_json = serde_json::to_value(&spec).unwrap_or(Value::Null);
@@ -151,6 +170,9 @@ impl Server {
         let mut body = vec![("spec", spec_json), ("interactive", interactive.into())];
         if reports {
             body.push(("reports_outcome", true.into()));
+        }
+        if let Some(name) = saved {
+            body.push(("saved", name.into()));
         }
         self.log.record(Kind::Render, Some(&view), &body);
         self.monitor.rendered(&view, interactive, pattern);
@@ -173,6 +195,7 @@ impl Server {
         let deadline = Instant::now() + Duration::from_millis(ms);
         loop {
             match self.viewer.recv(deadline) {
+                Recv::Event(ev @ Event::Saved { .. }) => self.log_saved(&ev),
                 Recv::Event(ev) => {
                     if let Some(answer) = self.monitor.accept(&view, &ev) {
                         let mut body = vec![("answer", answer.clone())];
@@ -217,6 +240,48 @@ impl Server {
         Ok(json!({"status": "closed"}))
     }
 
+    /// Lists saved views, or returns one in full.
+    fn library(&mut self, args: &Value) -> Result<Value, String> {
+        let Some(name) = args.get("name").filter(|v| !v.is_null()) else {
+            let views = self.library.list();
+            if views.is_empty() {
+                return Ok(json!({
+                    "views": [],
+                    "hint": "nothing saved yet; the user saves a view with Ctrl-S"
+                }));
+            }
+            return Ok(json!({"views": views}));
+        };
+        let name = name
+            .as_str()
+            .ok_or("`name` must be a string, such as \"sheet\"")?;
+        let (scope, path, entry) = self
+            .library
+            .load(name)
+            .inspect_err(|e| self.log_error(None, e))?;
+        let mut out = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+        out["scope"] = scope.as_str().into();
+        out["path"] = path.display().to_string().into();
+        Ok(out)
+    }
+
+    fn log_saved(&mut self, ev: &Event) {
+        if let Event::Saved {
+            view,
+            name,
+            scope,
+            path,
+        } = ev
+        {
+            let body = [
+                ("name", name.as_str().into()),
+                ("scope", scope.as_str().into()),
+                ("path", path.as_str().into()),
+            ];
+            self.log.record(Kind::Saved, Some(view), &body);
+        }
+    }
+
     /// Logs a refused move and hands back its message.
     fn refuse(&mut self, view: Option<&str>, Refusal(why): Refusal) -> String {
         self.log
@@ -234,6 +299,30 @@ fn view_arg(args: &Value) -> Result<String, String> {
     match args["view"].as_str() {
         Some(v) if !v.is_empty() => Ok(v.to_string()),
         _ => Err("missing `view`: name the view, e.g. \"deploy-confirm\"".into()),
+    }
+}
+
+/// The spec to render: inline under `spec`, or the saved view named by
+/// `saved`, whose name comes back for the log.
+fn spec_arg(library: &Library, args: &Value) -> Result<(Node, Option<String>), String> {
+    let given = |k| args.get(k).filter(|v| !v.is_null());
+    match (given("spec"), given("saved")) {
+        (Some(spec), None) => Ok((volvelle_schema::parse_spec(spec.clone())?, None)),
+        (None, Some(saved)) => {
+            let name = saved
+                .as_str()
+                .ok_or("`saved` must be a name from `library`")?;
+            let (_, _, entry) = library.load(name)?;
+            let spec = volvelle_schema::parse_spec(entry.spec)
+                .map_err(|e| format!("{e} (from saved view {name:?})"))?;
+            Ok((spec, Some(name.to_string())))
+        }
+        (Some(_), Some(_)) => Err(
+            "give `spec` or `saved`, not both; allowed: an inline spec, a saved view's name".into(),
+        ),
+        (None, None) => Err(
+            "missing `spec`; allowed: an inline spec, `saved` with a name from `library`".into(),
+        ),
     }
 }
 
@@ -278,6 +367,16 @@ fn tools() -> Value {
             "name": "close",
             "description": "Close the volvelle pane. Every open view ends.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "library",
+            "description": LIBRARY_DESC,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "A saved view to return in full."}
+                }
+            }
         }
     ])
 }
@@ -352,9 +451,10 @@ fn render_schema() -> Value {
         "type": "object",
         "properties": {
             "view": {"type": "string", "description": "Names this view. Reuse it to update the view in place."},
-            "spec": {"$ref": "#/$defs/Node"}
+            "spec": {"$ref": "#/$defs/Node"},
+            "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."}
         },
-        "required": ["view", "spec"],
+        "required": ["view"],
         "$defs": defs
     })
 }
@@ -375,6 +475,137 @@ fn retarget(v: &mut Value, from: &str, to: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::BufReader;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use volvelle_schema::library::{Entry, Origin, Scope, now_ms};
+
+    fn temp(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vv-{tag}-{}-{}", std::process::id(), now_ms()))
+    }
+
+    /// A user library holding `sheet`, plus `broken`, whose pattern
+    /// version does not exist.
+    fn library(root: &std::path::Path) -> Library {
+        let lib = Library {
+            project: None,
+            user: Some(root.join("user")),
+        };
+        let spec = volvelle_schema::parse_spec(json!({"type": "box", "title": "Sheet",
+            "children": [{"type": "button", "id": "ok", "label": "OK"}]}))
+        .unwrap();
+        let origin = Origin {
+            view: "v0".into(),
+            pane: None,
+        };
+        lib.save(Scope::User, &Entry::new("sheet", &spec, origin.clone()))
+            .unwrap();
+        let mut broken = Entry::new("broken", &spec, origin);
+        broken.spec = json!({"type": "pattern", "name": "confirm-destructive@9", "id": "x"});
+        lib.save(Scope::User, &broken).unwrap();
+        lib
+    }
+
+    #[test]
+    fn render_takes_exactly_one_of_spec_or_saved() {
+        let root = temp("args");
+        let lib = library(&root);
+        let spec = json!({"type": "text", "text": "hi"});
+        let (_, saved) = spec_arg(&lib, &json!({"view": "v", "spec": spec})).unwrap();
+        assert_eq!(saved, None);
+        let (node, saved) = spec_arg(&lib, &json!({"view": "v", "saved": "sheet"})).unwrap();
+        assert_eq!(saved.as_deref(), Some("sheet"));
+        assert_eq!(node.children()[0].id(), Some("ok"));
+        let both = spec_arg(&lib, &json!({"view": "v", "spec": spec, "saved": "sheet"}));
+        assert!(
+            both.unwrap_err()
+                .starts_with("give `spec` or `saved`, not both")
+        );
+        let neither = spec_arg(&lib, &json!({"view": "v", "spec": null}));
+        assert!(neither.unwrap_err().starts_with("missing `spec`"));
+        let missing = spec_arg(&lib, &json!({"view": "v", "saved": "map"})).unwrap_err();
+        assert!(missing.starts_with("no saved view \"map\"; allowed: \"broken\", \"sheet\""));
+        let broken = spec_arg(&lib, &json!({"view": "v", "saved": "broken"})).unwrap_err();
+        assert!(broken.starts_with("invalid spec: "), "{broken}");
+        assert!(broken.ends_with(" (from saved view \"broken\")"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saved_views_render_and_saves_are_logged_without_answering() {
+        let root = temp("e2e");
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let fake = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+            let request: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            let mut w = stream;
+            let saved = json!({"type": "saved", "view": "v", "name": "sheet2",
+                               "scope": "user", "path": "/lib/sheet2.json"});
+            let submit = json!({"type": "submit", "view": "v", "button": "ok", "values": {}});
+            writeln!(w, "{saved}\n{submit}").unwrap();
+            request
+        });
+        let mut server = Server {
+            viewer: Viewer::at(socket, None),
+            monitor: Monitor::default(),
+            log: Log::new(root.join("log"), None),
+            library: library(&root),
+        };
+        let text = |v: &Value| v["content"][0]["text"].as_str().unwrap().to_string();
+
+        let rendered = server.call("render", &json!({"view": "v", "saved": "sheet"}));
+        assert!(rendered.get("isError").is_none(), "{}", text(&rendered));
+        let request = fake.join().unwrap();
+        assert_eq!(request["op"], "render");
+        assert_eq!(request["spec"]["title"], "Sheet");
+
+        let answer = server.call("wait_event", &json!({"view": "v", "timeout_ms": 5000}));
+        let answer: Value = serde_json::from_str(&text(&answer)).unwrap();
+        assert_eq!(answer["type"], "submit");
+
+        let listed = server.call("library", &json!({}));
+        let listed: Value = serde_json::from_str(&text(&listed)).unwrap();
+        let names: Vec<&str> = listed["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["broken", "sheet"]);
+        let full = server.call("library", &json!({"name": "sheet"}));
+        let full: Value = serde_json::from_str(&text(&full)).unwrap();
+        assert_eq!(
+            (&full["scope"], &full["origin"]["view"]),
+            (&json!("user"), &json!("v0"))
+        );
+        assert_eq!(full["spec"]["title"], "Sheet");
+
+        let log = fs::read_dir(root.join("log"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let records: Vec<Value> = fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let kinds: Vec<&str> = records
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["start", "render", "saved", "answer"]);
+        assert_eq!(records[1]["saved"], "sheet");
+        assert_eq!(
+            (&records[2]["name"], &records[2]["view"]),
+            (&json!("sheet2"), &json!("v"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn render_description_lists_every_pattern() {
@@ -393,5 +624,14 @@ mod tests {
         let schema = render_schema();
         let text = schema.to_string();
         assert!(text.contains("confirm-destructive@1") && text.contains("choose-with-preview@1"));
+        assert_eq!(schema["required"], json!(["view"]));
+        assert_eq!(schema["properties"]["saved"]["type"], "string");
+        let names: Vec<Value> = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].clone())
+            .collect();
+        assert_eq!(names, ["render", "wait_event", "close", "library"]);
     }
 }

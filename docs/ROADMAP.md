@@ -68,21 +68,25 @@ composition with slots, a typed return value and its own session type.
 - Text and tables no longer shrink when space runs out; only interactive
   lists and selects do, and the body scrolls.
 
-### 4. Saved views
+### 4. Saved views (done)
 
 The human decides what to keep: a view that proved useful is saved by name
 and brought back later. This is crystallisation at its simplest, before
 saved views gain slots and become patterns.
 
-- Ctrl-S in the viewer asks for a name and saves the current spec.
+- Ctrl-S in the viewer asks for a name and a library, and saves the spec as
+  rendered.
 - Two libraries: per project in `.volvelle/library/` (can be committed) and
-  per user in `~/.local/share/volvelle/library/`. Project entries shadow user
-  entries with the same name.
-- A `library` tool lists saved views with a one-line summary each.
+  per user in `~/.local/share/volvelle/library/` (or
+  `$VOLVELLE_USER_LIBRARY`). Project entries shadow user entries with the
+  same name.
+- A `library` tool lists saved views with a one-line summary each, and
+  returns one in full by name.
 - `render` accepts `{"saved": "<name>"}` in place of a spec, and the agent can
   read a saved spec to adapt it.
-- Saved views record their origin (session, view, time) so the log can show
-  which ones get reused.
+- Saved views record their origin (view, pane, time), and the session log
+  records each save and each render from the library, so it shows which ones
+  get reused.
 
 ### 5. Data binding
 

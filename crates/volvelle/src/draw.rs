@@ -18,7 +18,7 @@ use volvelle_schema::{
     Tone,
 };
 
-use crate::app::{self, App, Field};
+use crate::app::{self, App, Field, Notice, Prompt};
 use crate::markdown;
 use crate::tree;
 
@@ -57,6 +57,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [body, status] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
     app.scroll.page = body.height;
+    draw_body(frame, app, body, status);
+    if let Some(p) = &app.prompt
+        && !p.overwrite
+    {
+        let x = Line::from(prompt_label(p)).width() as u16;
+        frame.set_cursor_position((status.x + x.min(status.width.saturating_sub(1)), status.y));
+    }
+}
+
+fn draw_body(frame: &mut Frame, app: &mut App, body: Rect, status: Rect) {
     let Some(spec) = &app.spec else {
         let [_, mid, _] = Layout::vertical([
             Constraint::Fill(1),
@@ -131,17 +141,73 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Span::styled(more, palette::muted()), right);
 }
 
+/// The prompt up to its text cursor.
+fn prompt_label(p: &Prompt) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(" save as: ", palette::accent()),
+        Span::raw(p.name.clone()),
+    ]
+}
+
+/// The Ctrl-S prompt: `save as: <name>  [project|user]`, then any error.
+fn prompt_line(p: &Prompt, app: &App) -> Line<'static> {
+    let hint = |s: &'static str| Span::styled(s, palette::muted());
+    if p.overwrite {
+        return Line::from(vec![
+            Span::styled(
+                format!(" overwrite {:?}? y/n", p.name),
+                Style::new().fg(Color::Yellow).bold(),
+            ),
+            Span::styled(format!(" · in the {} library", p.scope), palette::muted()),
+        ]);
+    }
+    let mut spans = prompt_label(p);
+    spans.push(hint("  ["));
+    for (i, scope) in app.library.scopes().into_iter().enumerate() {
+        if i > 0 {
+            spans.push(hint("|"));
+        }
+        let style = if scope == p.scope {
+            palette::accent().bold()
+        } else {
+            palette::muted()
+        };
+        spans.push(Span::styled(scope.as_str(), style));
+    }
+    spans.push(hint("]"));
+    match &p.error {
+        Some(e) => spans.push(Span::styled(format!(" · {e}"), Style::new().fg(Color::Red))),
+        None if app.library.scopes().len() > 1 => {
+            spans.push(hint(" · tab scope · enter save · esc cancel"))
+        }
+        None => spans.push(hint(" · enter save · esc cancel")),
+    }
+    Line::from(spans)
+}
+
 fn status_line(app: &App) -> Line<'static> {
     let hint = |s: &'static str| Span::styled(s, palette::muted());
-    if app.notice.is_some() {
-        Line::styled(
-            " ✓ already sent · waiting for the agent",
-            Style::new().fg(Color::Yellow).bold(),
-        )
+    if let Some(p) = &app.prompt {
+        prompt_line(p, app)
+    } else if let Some((_, notice)) = &app.notice {
+        match notice {
+            Notice::Locked => Line::styled(
+                " ✓ already sent · waiting for the agent",
+                Style::new().fg(Color::Yellow).bold(),
+            ),
+            Notice::Saved { name, scope } => Line::styled(
+                format!(" ✓ saved {name:?} to {scope} library"),
+                Style::new().fg(Color::Green).bold(),
+            ),
+            Notice::NoLibrary => Line::styled(
+                " nothing to save to: set VOLVELLE_USER_LIBRARY or HOME",
+                Style::new().fg(Color::Yellow).bold(),
+            ),
+        }
     } else if app.answered {
         Line::from(vec![
             Span::styled(" ✓ sent", Style::new().fg(Color::Green)),
-            hint(" · waiting for the agent"),
+            hint(" · waiting for the agent · ctrl-s save"),
         ])
     } else if matches!(
         app.focused_field(),
@@ -177,7 +243,7 @@ fn status_line(app: &App) -> Line<'static> {
             " tab next · shift-tab back · space toggle · enter confirm · esc cancel",
         ))
     } else {
-        Line::from(hint(" ctrl-c close"))
+        Line::from(hint(" ctrl-s save · ctrl-c close"))
     }
 }
 
@@ -910,7 +976,7 @@ fn buttons(f: &mut Canvas, area: Rect, run: &[&Node], app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
@@ -1159,5 +1225,30 @@ mod tests {
         a.key(KeyEvent::from(KeyCode::Up));
         let rows = screen(&mut term, &mut a);
         assert!(rows[1].contains("line 4"));
+    }
+
+    #[test]
+    fn save_prompt_takes_the_status_line() {
+        let mut a = app(json!({"type": "button", "id": "ok", "label": "OK"}));
+        a.library = volvelle_schema::library::Library {
+            project: Some("/nonexistent/p".into()),
+            user: Some("/nonexistent/u".into()),
+        };
+        let mut term = Terminal::new(TestBackend::new(70, 6)).unwrap();
+        a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        for c in "map".chars() {
+            a.key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let rows = screen(&mut term, &mut a);
+        assert!(
+            rows[5].starts_with(" save as: map  [project|user] · tab scope"),
+            "{}",
+            rows[5]
+        );
+        term.backend_mut().assert_cursor_position((13, 5));
+        a.key(KeyEvent::from(KeyCode::Char('!')));
+        a.key(KeyEvent::from(KeyCode::Enter));
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[5].contains("[project|user] · use a-z"), "{}", rows[5]);
     }
 }

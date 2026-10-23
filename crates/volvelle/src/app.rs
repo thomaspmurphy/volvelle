@@ -5,12 +5,15 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value, json};
+use volvelle_schema::library::{self, Entry, Library, Origin, Scope};
 use volvelle_schema::{Event, Item, Node, Pattern};
 
 use crate::tree::TreeState;
 
 /// How long the status line stays emphasised after a key on a locked view.
 const NOTICE: Duration = Duration::from_millis(1500);
+/// How long the status line confirms a save.
+const SAVED_NOTICE: Duration = Duration::from_secs(3);
 
 pub enum Field {
     /// `cursor` counts chars; `top` is the first line shown when multiline.
@@ -62,10 +65,39 @@ pub struct App {
     /// Set once the user has answered. The view locks until the next render,
     /// so one render gets exactly one answer.
     pub answered: bool,
-    /// When the locked-view notice expires.
-    pub notice: Option<Instant>,
+    /// A transient status message and when it expires.
+    pub notice: Option<(Instant, Notice)>,
+    /// The Ctrl-S prompt, which takes every key while open.
+    pub prompt: Option<Prompt>,
+    pub library: Library,
+    /// This viewer's herdr pane, recorded as a saved view's origin.
+    pub pane: Option<String>,
     pub scroll: Scroll,
     pub quit: bool,
+}
+
+pub enum Notice {
+    /// A key on a view that has already answered.
+    Locked,
+    Saved {
+        name: String,
+        scope: Scope,
+    },
+    /// Ctrl-S with neither a project nor a user library.
+    NoLibrary,
+}
+
+/// Asks for a name to save the current view under.
+pub struct Prompt {
+    pub name: String,
+    pub scope: Scope,
+    /// Why Enter was refused, shown until the next edit.
+    pub error: Option<String>,
+    /// Waiting on y or n before replacing an entry with this name.
+    pub overwrite: bool,
+    /// The view as rendered when Ctrl-S was pressed.
+    view: String,
+    spec: Node,
 }
 
 /// Vertical scroll of a body taller than the pane.
@@ -111,7 +143,9 @@ impl App {
         self.fields = fields;
         self.spec = Some(spec);
         self.answered = false;
-        self.notice = None;
+        if matches!(self.notice, Some((_, Notice::Locked))) {
+            self.notice = None;
+        }
     }
 
     pub fn focused_id(&self) -> Option<&str> {
@@ -145,7 +179,7 @@ impl App {
 
     /// Clears an expired notice, returning true when the status line changes.
     pub fn expire(&mut self, now: Instant) -> bool {
-        let expired = self.notice.is_some_and(|t| now >= t);
+        let expired = self.notice.as_ref().is_some_and(|(t, _)| now >= *t);
         if expired {
             self.notice = None;
         }
@@ -187,11 +221,19 @@ impl App {
 
     /// Handles a key press, returning an event when the user answers.
     pub fn key(&mut self, key: KeyEvent) -> Option<Event> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
             self.quit = true;
             return None;
         }
+        if self.prompt.is_some() {
+            return self.prompt_key(key);
+        }
         self.spec.as_ref()?;
+        if ctrl && key.code == KeyCode::Char('s') {
+            self.open_prompt();
+            return None;
+        }
         let step = self.scroll.page.saturating_sub(1).max(1);
         match key.code {
             KeyCode::PageUp => {
@@ -207,7 +249,7 @@ impl App {
             _ => self.scroll.manual = false,
         }
         if self.answered {
-            self.notice = Some(Instant::now() + NOTICE);
+            self.notice = Some((Instant::now() + NOTICE, Notice::Locked));
             return None;
         }
         match key.code {
@@ -418,6 +460,98 @@ impl App {
             },
         }
         None
+    }
+
+    /// Opens the save prompt on the view as it is now, answered or not.
+    fn open_prompt(&mut self) {
+        let Some(spec) = &self.spec else { return };
+        let Some(&scope) = self.library.scopes().first() else {
+            self.notice = Some((Instant::now() + SAVED_NOTICE, Notice::NoLibrary));
+            return;
+        };
+        self.prompt = Some(Prompt {
+            name: String::new(),
+            scope,
+            error: None,
+            overwrite: false,
+            view: self.view.clone(),
+            spec: spec.clone(),
+        });
+    }
+
+    /// Keys while the prompt is open. None of them reach the view.
+    fn prompt_key(&mut self, key: KeyEvent) -> Option<Event> {
+        let scopes = self.library.scopes();
+        let p = self.prompt.as_mut()?;
+        if p.overwrite {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => return self.save(),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => p.overwrite = false,
+                _ => {}
+            }
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Tab | KeyCode::BackTab => {
+                let i = scopes.iter().position(|s| *s == p.scope).unwrap_or(0);
+                p.scope = scopes[(i + 1) % scopes.len()];
+            }
+            KeyCode::Enter => {
+                if p.name.is_empty() {
+                    p.error = Some("type a name".into());
+                } else if library::valid_name(&p.name).is_err() {
+                    p.error = Some("use a-z, 0-9 and -".into());
+                } else if self.library.exists(p.scope, &p.name) {
+                    p.overwrite = true;
+                } else {
+                    return self.save();
+                }
+            }
+            KeyCode::Backspace => {
+                p.name.pop();
+                p.error = None;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                p.name.push(c);
+                p.error = None;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Writes the prompt's entry and closes the prompt, or shows why not.
+    fn save(&mut self) -> Option<Event> {
+        let p = self.prompt.as_mut()?;
+        let origin = Origin {
+            view: p.view.clone(),
+            pane: self.pane.clone(),
+        };
+        let entry = Entry::new(&p.name, &p.spec, origin);
+        match self.library.save(p.scope, &entry) {
+            Ok(path) => {
+                let Prompt {
+                    name, scope, view, ..
+                } = self.prompt.take()?;
+                let saved = Notice::Saved {
+                    name: name.clone(),
+                    scope,
+                };
+                self.notice = Some((Instant::now() + SAVED_NOTICE, saved));
+                Some(Event::Saved {
+                    view,
+                    name,
+                    scope,
+                    path: path.display().to_string(),
+                })
+            }
+            Err(e) => {
+                p.overwrite = false;
+                p.error = Some(e.to_string());
+                None
+            }
+        }
     }
 
     fn move_focus(&mut self, delta: isize) -> Option<Event> {
@@ -879,6 +1013,163 @@ mod tests {
         assert_eq!(value, json!({"selected": ["b"]}));
     }
 
+    fn libraries(tag: &str) -> Library {
+        let root = std::env::temp_dir().join(format!(
+            "volvelle-app-{tag}-{}-{}",
+            std::process::id(),
+            library::now_ms()
+        ));
+        Library {
+            project: Some(root.join("project")),
+            user: Some(root.join("user")),
+        }
+    }
+
+    fn cleanup(lib: Library) {
+        let root = lib.user.unwrap().parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn ctrl(app: &mut App, c: char) -> Option<Event> {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            assert!(press(app, KeyCode::Char(c)).is_none());
+        }
+    }
+
+    fn sheet() -> Node {
+        spec(json!({"type": "box", "title": "Sheet", "children": [
+            {"type": "input", "id": "hero", "value": "Ada"},
+            {"type": "button", "id": "ok", "label": "OK"}
+        ]}))
+    }
+
+    #[test]
+    fn ctrl_s_saves_the_spec_as_rendered() {
+        let lib = libraries("save");
+        let mut app = App {
+            library: lib.clone(),
+            pane: Some("p9".into()),
+            ..App::default()
+        };
+        app.render("sheet".into(), sheet());
+        type_str(&mut app, "!");
+        assert!(ctrl(&mut app, 's').is_none());
+        let p = app.prompt.as_ref().unwrap();
+        assert_eq!((p.name.as_str(), p.scope), ("", Scope::Project));
+
+        type_str(&mut app, "My Hero");
+        assert_eq!(app.prompt.as_ref().unwrap().name, "My Hero");
+        assert_eq!(app.values()["hero"], "Ada!", "typing goes to the prompt");
+        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert!(app.prompt.as_ref().unwrap().error.is_some());
+        for _ in 0.."My Hero".len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        assert!(app.prompt.as_ref().unwrap().error.is_none());
+        type_str(&mut app, "hero");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.prompt.as_ref().unwrap().scope, Scope::User);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.prompt.as_ref().unwrap().scope, Scope::Project);
+        press(&mut app, KeyCode::Tab);
+
+        let Some(Event::Saved {
+            view,
+            name,
+            scope,
+            path,
+        }) = press(&mut app, KeyCode::Enter)
+        else {
+            panic!("expected a save")
+        };
+        assert_eq!(
+            (view.as_str(), name.as_str(), scope),
+            ("sheet", "hero", Scope::User)
+        );
+        assert!(app.prompt.is_none());
+        assert!(matches!(app.notice, Some((_, Notice::Saved { .. }))));
+        assert!(!app.answered, "saving is not an answer");
+        assert_eq!(app.values()["hero"], "Ada!");
+        let (_, at, entry) = lib.load("hero").unwrap();
+        assert_eq!(at.display().to_string(), path);
+        assert_eq!(entry.spec["children"][0]["value"], "Ada");
+        assert_eq!(
+            (entry.origin.view.as_str(), entry.origin.pane.as_deref()),
+            ("sheet", Some("p9"))
+        );
+        assert!(!lib.exists(Scope::Project, "hero"));
+        cleanup(lib);
+    }
+
+    #[test]
+    fn ctrl_s_asks_before_overwriting() {
+        let lib = libraries("overwrite");
+        let mut app = App {
+            library: lib.clone(),
+            ..App::default()
+        };
+        app.render("sheet".into(), sheet());
+        ctrl(&mut app, 's');
+        type_str(&mut app, "map");
+        assert!(press(&mut app, KeyCode::Enter).is_some());
+
+        ctrl(&mut app, 's');
+        type_str(&mut app, "map");
+        assert!(press(&mut app, KeyCode::Enter).is_none());
+        assert!(app.prompt.as_ref().unwrap().overwrite);
+        assert!(press(&mut app, KeyCode::Char('x')).is_none());
+        press(&mut app, KeyCode::Char('n'));
+        let p = app.prompt.as_ref().unwrap();
+        assert!(!p.overwrite && p.name == "map");
+        press(&mut app, KeyCode::Enter);
+        let Some(Event::Saved { scope, .. }) = press(&mut app, KeyCode::Char('y')) else {
+            panic!("expected a save")
+        };
+        assert_eq!(scope, Scope::Project);
+        assert!(app.prompt.is_none());
+        cleanup(lib);
+    }
+
+    #[test]
+    fn esc_closes_the_prompt_without_cancelling_the_view() {
+        let mut app = App {
+            library: Library {
+                project: None,
+                user: Some(std::env::temp_dir().join("volvelle-app-unused")),
+            },
+            ..App::default()
+        };
+        app.render("sheet".into(), sheet());
+        ctrl(&mut app, 's');
+        assert_eq!(app.prompt.as_ref().unwrap().scope, Scope::User);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().scope,
+            Scope::User,
+            "no project"
+        );
+        type_str(&mut app, "q");
+        assert!(press(&mut app, KeyCode::Esc).is_none());
+        assert!(app.prompt.is_none() && !app.answered);
+        assert_eq!(app.values()["hero"], "Ada");
+
+        press(&mut app, KeyCode::Tab);
+        assert!(press(&mut app, KeyCode::Enter).is_some());
+        ctrl(&mut app, 's');
+        assert!(app.prompt.is_some(), "an answered view can be saved");
+        assert!(app.notice.is_none());
+
+        let mut bare = App::default();
+        bare.render("sheet".into(), sheet());
+        ctrl(&mut bare, 's');
+        assert!(bare.prompt.is_none());
+        assert!(matches!(bare.notice, Some((_, Notice::NoLibrary))));
+    }
+
     #[test]
     fn locked_view_gives_feedback() {
         let mut app = App::default();
@@ -890,7 +1181,7 @@ mod tests {
         assert!(app.notice.is_none());
         assert!(press(&mut app, KeyCode::Char('x')).is_none());
         let shown = Instant::now();
-        assert!(app.notice.is_some());
+        assert!(matches!(app.notice, Some((_, Notice::Locked))));
         assert!(!app.expire(shown));
         assert!(app.expire(shown + NOTICE));
         assert!(app.notice.is_none());
