@@ -1,4 +1,8 @@
-# volvelle
+<p align="center">
+  <img src="docs/images/volvelle.jpg" width="320" alt="A hand-coloured lunar volvelle from Peter Apian's Astronomicum Caesareum, 1540">
+</p>
+
+<h1 align="center">volvelle</h1>
 
 A combinatorial terminal UI for agents. An agent composes an interface from a
 fixed catalog of atoms; a ratatui viewer renders it in a herdr pane beside the
@@ -6,7 +10,10 @@ agent and returns the human's answer as typed JSON.
 
 A volvelle is a paper wheel of rotating discs, used from Llull to Kircher to
 generate new combinations from fixed tables. Volvelle does the same with
-interfaces.
+interfaces. The one above, from Peter Apian's *Astronomicum Caesareum* (1540),
+works out the moon's position and phase. The scan is public domain, from
+Houghton Library, Harvard University (Typ 520.40.150), via
+[Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Houghton_Typ_520.40.150_-_Astronomicum_Caesareum,_1540_-_f2r.jpg).
 
 ![An RPG played with an agent through volvelle](docs/images/rpg.png)
 
