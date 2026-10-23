@@ -1,5 +1,6 @@
 //! Saved views. The human keeps a view that proved useful by saving its spec
-//! under a name, and the agent brings it back later. There are two
+//! under a name, and the agent brings it back later. The agent may save
+//! views too, but never over the human's. There are two
 //! libraries: one per project in `<project>/.volvelle/library`, which can be
 //! committed, and one per user. A project entry shadows a user entry with
 //! the same name.
@@ -57,6 +58,27 @@ pub struct Origin {
     pub view: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    /// Entries saved before this field existed were all the user's.
+    #[serde(default)]
+    pub by: By,
+}
+
+/// Who saved an entry. An agent may never overwrite the user's entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum By {
+    #[default]
+    User,
+    Agent,
+}
+
+impl By {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            By::User => "user",
+            By::Agent => "agent",
+        }
+    }
 }
 
 impl Entry {
@@ -80,6 +102,7 @@ pub struct Listed {
     pub summary: String,
     pub saved_at_ms: u64,
     pub origin_view: String,
+    pub by: By,
 }
 
 /// The two library directories. Either may be missing: a viewer started
@@ -123,6 +146,17 @@ impl Library {
         self.path(scope, name).is_some_and(|p| p.exists())
     }
 
+    /// The entry saved as `name` in `scope` alone, if there is one.
+    pub fn get(&self, scope: Scope, name: &str) -> Result<Option<Entry>, String> {
+        valid_name(name)?;
+        match self.path(scope, name) {
+            Some(path) if path.exists() => read(&path)
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", path.display())),
+            _ => Ok(None),
+        }
+    }
+
     /// Writes an entry, replacing any with the same name in that scope.
     /// Null fields are left out of the spec, so the file stays close to
     /// what the agent sent.
@@ -160,7 +194,7 @@ impl Library {
             .map(|l| format!("{:?}", l.name))
             .collect();
         let allowed = if names.is_empty() {
-            "nothing saved yet; the user saves a view with Ctrl-S".to_string()
+            "nothing saved yet; the user saves with Ctrl-S, the agent with `save`".to_string()
         } else {
             names.join(", ")
         };
@@ -194,6 +228,7 @@ impl Library {
                         summary: e.summary,
                         saved_at_ms: e.saved_at_ms,
                         origin_view: e.origin.view,
+                        by: e.origin.by,
                     },
                     Err(e) => Listed {
                         name: name.to_string(),
@@ -201,6 +236,7 @@ impl Library {
                         summary: format!("unreadable: {e}"),
                         saved_at_ms: 0,
                         origin_view: String::new(),
+                        by: By::User,
                     },
                 });
             }
@@ -494,6 +530,7 @@ mod tests {
         let origin = Origin {
             view: "sheet".into(),
             pane: Some("p1".into()),
+            by: By::Agent,
         };
         let entry = Entry::new("sheet", &sheet(), origin);
         let path = lib.save(Scope::User, &entry).unwrap();
@@ -503,6 +540,11 @@ mod tests {
         let (scope, _, back) = lib.load("sheet").unwrap();
         assert_eq!(scope, Scope::User);
         assert_eq!(back.origin.pane.as_deref(), Some("p1"));
+        assert_eq!(back.origin.by, By::Agent);
+        assert_eq!(lib.list()[0].by, By::Agent);
+        assert!(lib.get(Scope::User, "sheet").unwrap().is_some());
+        assert!(lib.get(Scope::User, "map").unwrap().is_none());
+        assert!(lib.get(Scope::Project, "sheet").unwrap().is_none());
         assert_eq!(back.saved_at_ms, entry.saved_at_ms);
         let reparsed = serde_json::to_value(parse_spec(back.spec).unwrap()).unwrap();
         assert_eq!(reparsed, entry.spec);
@@ -516,6 +558,27 @@ mod tests {
     }
 
     #[test]
+    fn entries_without_by_were_saved_by_the_user() {
+        let dir = temp("by");
+        let lib = Library {
+            project: None,
+            user: Some(dir.clone()),
+        };
+        fs::create_dir_all(&dir).unwrap();
+        let old = json!({"name": "old", "spec": {"type": "text", "text": "hi"},
+            "saved_at_ms": 1, "origin": {"view": "v"}, "summary": "hi"});
+        fs::write(dir.join("old.json"), old.to_string()).unwrap();
+        let (_, _, entry) = lib.load("old").unwrap();
+        assert_eq!(entry.origin.by, By::User);
+        assert_eq!(lib.list()[0].by, By::User);
+        let listed = serde_json::to_value(&lib.list()[0]).unwrap();
+        assert_eq!(listed["by"], "user");
+        let text = serde_json::to_value(&entry).unwrap();
+        assert_eq!(text["origin"]["by"], "user");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn project_entries_shadow_user_entries() {
         let root = temp("shadow");
         let lib = Library {
@@ -526,6 +589,7 @@ mod tests {
         let origin = |v: &str| Origin {
             view: v.into(),
             pane: None,
+            by: By::User,
         };
         lib.save(Scope::User, &Entry::new("sheet", &sheet(), origin("u")))
             .unwrap();

@@ -6,11 +6,12 @@ mod log;
 mod session;
 mod viewer;
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use volvelle_schema::library::Library;
+use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
 use volvelle_schema::{Event, Node, PatternInfo, Request};
 
 use log::{Kind, Log};
@@ -27,8 +28,10 @@ a typed function call: `render` returns the shape the answer will take, and `wai
 returns exactly that shape. Protocol per view: render, then any number of re-renders (each \
 keeps what the user has entered), then one wait_event that returns the answer. A view with no \
 fields or buttons is display-only and cannot be waited on. Prefer a pattern when one fits: \
-it carries safe defaults and its own protocol. The user can save any view with Ctrl-S; \
-`library` lists saved views, and `render` with `saved` brings one back.";
+it carries safe defaults and its own protocol. Saved views: call `library` before composing a \
+view that may already exist, and render by name when one fits. `save` views likely to recur \
+(dashboards, forms, sheets, menus the session will come back to), not one-off questions. A \
+saved view is static: to adapt one, fetch it with `library {name}` and send a spec.";
 
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
@@ -37,7 +40,7 @@ a new `view` name replaces the old one. Atoms: box (row/column, optional border/
 fold, selectable with an id; a node's value defaults to its label path joined with /), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
 unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
-`saved`, the name of a view the user saved (see `library`). Returns the JSON Schema of the \
+`saved`, a name from `library`; prefer `saved` when one fits, as it sends no spec. Returns the JSON Schema of the \
 eventual answer.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
@@ -51,16 +54,23 @@ says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
 
-const LIBRARY_DESC: &str = "List the views the user saved with Ctrl-S: name, scope (project \
-or user; project entries shadow user ones), a one-line summary, when and from which view. With \
-`name`, return that entry in full, including its `spec`, to adapt it or to render it with \
-`saved`.";
+const LIBRARY_DESC: &str = "List saved views; call it before composing a view that may already \
+exist. Each has a name, scope (project or user; project shadows user), one-line summary, when, \
+from which view, and `by` (user, via Ctrl-S, or agent, via `save`). With `name`, return that \
+entry in full, `spec` included, to adapt it; to reuse it as is, render with `saved`.";
+
+const SAVE_DESC: &str = "Save a view to reuse it later with `render {view, saved}`, which \
+costs far fewer tokens than sending the spec again. Pass exactly one of `view`, a view \
+rendered in this session, or `spec`. Scope is project (default) or user. The user's entries \
+cannot be replaced; your own need `overwrite: true`. Returns the name, scope and summary.";
 
 struct Server {
     viewer: Viewer,
     monitor: Monitor,
     log: Log,
     library: Library,
+    /// The spec last rendered under each view id, for `save`.
+    rendered: HashMap<String, Node>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,6 +82,7 @@ fn main() -> anyhow::Result<()> {
         viewer: Viewer::new(project),
         monitor: Monitor::default(),
         log: Log::from_env(),
+        rendered: HashMap::new(),
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -130,6 +141,7 @@ impl Server {
             "wait_event" => self.wait_event(args),
             "close" => self.close(),
             "library" => self.library(args),
+            "save" => self.save(args),
             other => Err(format!("unknown tool {other:?}")),
         };
         match outcome {
@@ -163,10 +175,11 @@ impl Server {
         self.viewer
             .send(&Request::Render {
                 view: view.clone(),
-                spec,
+                spec: spec.clone(),
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
+        self.rendered.insert(view.clone(), spec);
         let mut body = vec![("spec", spec_json), ("interactive", interactive.into())];
         if reports {
             body.push(("reports_outcome", true.into()));
@@ -247,7 +260,7 @@ impl Server {
             if views.is_empty() {
                 return Ok(json!({
                     "views": [],
-                    "hint": "nothing saved yet; the user saves a view with Ctrl-S"
+                    "hint": "nothing saved yet; the user saves with Ctrl-S, you with `save`"
                 }));
             }
             return Ok(json!({"views": views}));
@@ -265,6 +278,136 @@ impl Server {
         Ok(out)
     }
 
+    /// Saves a view the agent expects to reuse. The user's entries are
+    /// never replaced, and the agent's own only with `overwrite`.
+    fn save(&mut self, args: &Value) -> Result<Value, String> {
+        let result = self.save_entry(args);
+        if let Err(e) = &result {
+            self.log_error(args["view"].as_str(), e);
+        }
+        result
+    }
+
+    fn save_entry(&mut self, args: &Value) -> Result<Value, String> {
+        let name = args["name"]
+            .as_str()
+            .ok_or("missing `name`: name the saved view, e.g. \"sheet\"")?;
+        library::valid_name(name)?;
+        let scope = match args.get("scope").and_then(Value::as_str) {
+            None => Scope::Project,
+            Some("project") => Scope::Project,
+            Some("user") => Scope::User,
+            Some(other) => return Err(format!("unknown scope {other:?}; allowed: project, user")),
+        };
+        if self.library.dir(scope).is_none() {
+            let allowed: Vec<&str> = self.library.scopes().iter().map(|s| s.as_str()).collect();
+            return Err(format!(
+                "no {scope} library; allowed: {}",
+                allowed.join(", ")
+            ));
+        }
+        let given = |k| args.get(k).filter(|v| !v.is_null());
+        let (spec, view) = match (given("view"), given("spec")) {
+            (Some(view), None) => {
+                let view = view.as_str().ok_or("`view` must be a view id")?;
+                let Some(spec) = self.rendered.get(view) else {
+                    let mut ids: Vec<String> =
+                        self.rendered.keys().map(|v| format!("{v:?}")).collect();
+                    ids.sort();
+                    let allowed = if ids.is_empty() {
+                        "nothing rendered yet; pass `spec` instead".to_string()
+                    } else {
+                        ids.join(", ")
+                    };
+                    return Err(format!(
+                        "no view {view:?} rendered in this session; allowed: {allowed}"
+                    ));
+                };
+                (spec.clone(), view.to_string())
+            }
+            (None, Some(spec)) => (volvelle_schema::parse_spec(spec.clone())?, String::new()),
+            (Some(_), Some(_)) => {
+                return Err(
+                    "give `view` or `spec`, not both; allowed: a rendered view id, an inline spec"
+                        .into(),
+                );
+            }
+            (None, None) => {
+                return Err(
+                    "missing `view`; allowed: a rendered view id, `spec` with an inline spec"
+                        .into(),
+                );
+            }
+        };
+        let overwrite = args["overwrite"].as_bool().unwrap_or(false);
+        if let Some(old) = self.library.get(scope, name)? {
+            let free = self.free_names(scope, name);
+            match old.origin.by {
+                By::User => {
+                    return Err(format!(
+                        "{name:?} in the {scope} library was saved by the user and only they can replace it; allowed: {free}"
+                    ));
+                }
+                By::Agent if !overwrite => {
+                    return Err(format!(
+                        "{name:?} is already saved in the {scope} library; allowed: `overwrite: true`, {free}"
+                    ));
+                }
+                By::Agent => {}
+            }
+        }
+        let origin = Origin {
+            view: view.clone(),
+            pane: None,
+            by: By::Agent,
+        };
+        let mut entry = Entry::new(name, &spec, origin);
+        if let Some(summary) = args["summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            entry.summary = summary.to_string();
+        }
+        let path = self
+            .library
+            .save(scope, &entry)
+            .map_err(|e| e.to_string())?;
+        let body = [
+            ("name", name.into()),
+            ("scope", scope.as_str().into()),
+            ("path", path.display().to_string().into()),
+            ("by", By::Agent.as_str().into()),
+        ];
+        let view = Some(view.as_str()).filter(|v| !v.is_empty());
+        self.log.record(Kind::Saved, view, &body);
+        Ok(json!({
+            "name": name,
+            "scope": scope,
+            "summary": entry.summary,
+            "next": format!("render with {{\"saved\": {name:?}}}"),
+        }))
+    }
+
+    /// Names that are free to save to: the first unused `<name>-<n>` in
+    /// `scope`, and `name` in the project library when saving to the user
+    /// one, since a project entry would not be shadowed.
+    fn free_names(&self, scope: Scope, name: &str) -> String {
+        let base = name.get(..61).unwrap_or(name).trim_end_matches('-');
+        let next = (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|n| !self.library.exists(scope, n))
+            .expect("some suffix is free");
+        let mut free = vec![format!("{next:?}")];
+        if scope == Scope::User
+            && self.library.dir(Scope::Project).is_some()
+            && !self.library.exists(Scope::Project, name)
+        {
+            free.push(format!("{name:?} with scope project"));
+        }
+        free.join(", ")
+    }
+
     fn log_saved(&mut self, ev: &Event) {
         if let Event::Saved {
             view,
@@ -277,6 +420,7 @@ impl Server {
                 ("name", name.as_str().into()),
                 ("scope", scope.as_str().into()),
                 ("path", path.as_str().into()),
+                ("by", By::User.as_str().into()),
             ];
             self.log.record(Kind::Saved, Some(view), &body);
         }
@@ -376,6 +520,22 @@ fn tools() -> Value {
                 "properties": {
                     "name": {"type": "string", "description": "A saved view to return in full."}
                 }
+            }
+        },
+        {
+            "name": "save",
+            "description": SAVE_DESC,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+                    "view": {"type": "string", "description": "Save the spec last rendered under this view id."},
+                    "spec": {"type": "object", "description": "Save this spec instead; it is validated first."},
+                    "scope": {"type": "string", "enum": ["project", "user"], "default": "project"},
+                    "summary": {"type": "string", "description": "One line for `library`; generated when omitted."},
+                    "overwrite": {"type": "boolean", "default": false, "description": "Replace your own entry with this name."}
+                },
+                "required": ["name"]
             }
         }
     ])
@@ -498,6 +658,7 @@ mod tests {
         let origin = Origin {
             view: "v0".into(),
             pane: None,
+            by: By::User,
         };
         lib.save(Scope::User, &Entry::new("sheet", &spec, origin.clone()))
             .unwrap();
@@ -554,6 +715,7 @@ mod tests {
             monitor: Monitor::default(),
             log: Log::new(root.join("log"), None),
             library: library(&root),
+            rendered: HashMap::new(),
         };
         let text = |v: &Value| v["content"][0]["text"].as_str().unwrap().to_string();
 
@@ -601,9 +763,207 @@ mod tests {
         assert_eq!(kinds, ["start", "render", "saved", "answer"]);
         assert_eq!(records[1]["saved"], "sheet");
         assert_eq!(
-            (&records[2]["name"], &records[2]["view"]),
-            (&json!("sheet2"), &json!("v"))
+            (&records[2]["name"], &records[2]["view"], &records[2]["by"]),
+            (&json!("sheet2"), &json!("v"), &json!("user"))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A server whose viewer is a fake that takes one render, with a
+    /// project library and the user library from [`library`].
+    fn server(root: &std::path::Path) -> (Server, std::thread::JoinHandle<Value>) {
+        fs::create_dir_all(root).unwrap();
+        let socket = root.join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let fake = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+        });
+        let mut library = library(root);
+        library.project = Some(root.join("proj"));
+        let server = Server {
+            viewer: Viewer::at(socket, None),
+            monitor: Monitor::default(),
+            log: Log::new(root.join("log"), None),
+            library,
+            rendered: HashMap::new(),
+        };
+        (server, fake)
+    }
+
+    fn reply(v: &Value) -> Result<Value, String> {
+        let text = v["content"][0]["text"].as_str().unwrap();
+        if v.get("isError").is_some() {
+            return Err(text.to_string());
+        }
+        Ok(serde_json::from_str(text).unwrap())
+    }
+
+    fn records(root: &std::path::Path) -> Vec<Value> {
+        let log = fs::read_dir(root.join("log"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        fs::read_to_string(log.path())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn save_keeps_the_spec_last_rendered_under_a_view() {
+        let root = temp("save-view");
+        let (mut server, fake) = server(&root);
+        let spec = json!({"type": "box", "title": "Dashboard",
+            "children": [{"type": "progress", "label": "CI", "value": 0.5}]});
+        let missing = reply(&server.call("save", &json!({"name": "dash", "view": "d"})));
+        assert_eq!(
+            missing.unwrap_err(),
+            "no view \"d\" rendered in this session; allowed: nothing rendered yet; pass `spec` instead"
+        );
+        reply(&server.call("render", &json!({"view": "d", "spec": spec}))).unwrap();
+        fake.join().unwrap();
+
+        let saved = reply(&server.call("save", &json!({"name": "dash", "view": "d"}))).unwrap();
+        assert_eq!(
+            saved,
+            json!({"name": "dash", "scope": "project", "summary": "Dashboard · 1 progress bar",
+                   "next": "render with {\"saved\": \"dash\"}"})
+        );
+        let (scope, _, entry) = server.library.load("dash").unwrap();
+        assert_eq!(scope, Scope::Project);
+        assert_eq!(
+            (entry.origin.by, entry.origin.view.as_str()),
+            (By::Agent, "d")
+        );
+        assert_eq!(entry.spec["title"], "Dashboard");
+
+        let listed = reply(&server.call("library", &json!({}))).unwrap();
+        let by: Vec<(&str, &str)> = listed["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| (v["name"].as_str().unwrap(), v["by"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            by,
+            [("broken", "user"), ("dash", "agent"), ("sheet", "user")]
+        );
+
+        let saved = records(&root)
+            .into_iter()
+            .find(|r| r["kind"] == "saved")
+            .unwrap();
+        assert_eq!(
+            (
+                &saved["name"],
+                &saved["view"],
+                &saved["by"],
+                &saved["scope"]
+            ),
+            (
+                &json!("dash"),
+                &json!("d"),
+                &json!("agent"),
+                &json!("project")
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_validates_a_given_spec_and_takes_a_summary() {
+        let root = temp("save-spec");
+        let (mut server, _fake) = server(&root);
+        let spec = json!({"type": "button", "id": "go", "label": "Go"});
+        let args = json!({"name": "go", "spec": spec, "scope": "user", "summary": " Launch "});
+        let saved = reply(&server.call("save", &args)).unwrap();
+        assert_eq!(
+            (&saved["scope"], &saved["summary"]),
+            (&json!("user"), &json!("Launch"))
+        );
+        let entry = server.library.get(Scope::User, "go").unwrap().unwrap();
+        assert_eq!(
+            (entry.origin.by, entry.origin.view.as_str()),
+            (By::Agent, "")
+        );
+
+        let bad = json!({"name": "x", "spec": {"type": "button", "label": "no id"}});
+        assert!(
+            reply(&server.call("save", &bad))
+                .unwrap_err()
+                .starts_with("invalid spec: ")
+        );
+        let both = json!({"name": "x", "view": "v", "spec": spec});
+        assert!(
+            reply(&server.call("save", &both))
+                .unwrap_err()
+                .starts_with("give `view` or `spec`, not both")
+        );
+        let scope = json!({"name": "x", "spec": spec, "scope": "team"});
+        assert_eq!(
+            reply(&server.call("save", &scope)).unwrap_err(),
+            "unknown scope \"team\"; allowed: project, user"
+        );
+        let name = json!({"name": "Big Sheet", "spec": spec});
+        assert!(
+            reply(&server.call("save", &name))
+                .unwrap_err()
+                .ends_with("; allowed: \"big-sheet\"")
+        );
+        assert!(!server.library.exists(Scope::Project, "x"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_never_replaces_the_users_entries() {
+        let root = temp("save-user");
+        let (mut server, _fake) = server(&root);
+        let spec = json!({"type": "text", "text": "mine"});
+        let args = json!({"name": "sheet", "spec": spec, "scope": "user", "overwrite": true});
+        let err = reply(&server.call("save", &args)).unwrap_err();
+        assert_eq!(
+            err,
+            "\"sheet\" in the user library was saved by the user and only they can replace it; \
+             allowed: \"sheet-2\", \"sheet\" with scope project"
+        );
+        let entry = server.library.get(Scope::User, "sheet").unwrap().unwrap();
+        assert_eq!(entry.origin.by, By::User);
+        assert_eq!(entry.spec["title"], "Sheet");
+        // The free name it offers really is free.
+        let args = json!({"name": "sheet", "spec": spec});
+        assert_eq!(
+            reply(&server.call("save", &args)).unwrap()["scope"],
+            "project"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn save_replaces_its_own_entries_only_when_asked() {
+        let root = temp("save-own");
+        let (mut server, _fake) = server(&root);
+        let first = json!({"name": "menu", "spec": {"type": "text", "text": "one"}});
+        reply(&server.call("save", &first)).unwrap();
+        let second = json!({"name": "menu", "spec": {"type": "text", "text": "two"}});
+        let err = reply(&server.call("save", &second)).unwrap_err();
+        assert_eq!(
+            err,
+            "\"menu\" is already saved in the project library; allowed: `overwrite: true`, \"menu-2\""
+        );
+        let (_, _, entry) = server.library.load("menu").unwrap();
+        assert_eq!(entry.spec["text"], "one");
+        let mut second = second;
+        second["overwrite"] = true.into();
+        assert_eq!(
+            reply(&server.call("save", &second)).unwrap()["summary"],
+            "two"
+        );
+        let (_, _, entry) = server.library.load("menu").unwrap();
+        assert_eq!(entry.spec["text"], "two");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -632,6 +992,6 @@ mod tests {
             .iter()
             .map(|t| t["name"].clone())
             .collect();
-        assert_eq!(names, ["render", "wait_event", "close", "library"]);
+        assert_eq!(names, ["render", "wait_event", "close", "library", "save"]);
     }
 }
