@@ -19,6 +19,7 @@ pub struct TreeState {
     open: Vec<bool>,
     /// The node under the cursor, which is always shown.
     cursor: usize,
+    leaves_only: bool,
 }
 
 impl TreeState {
@@ -34,6 +35,7 @@ impl TreeState {
             branches,
             open: flat.iter().map(|f| f.item.open).collect(),
             cursor: 0,
+            leaves_only: t.leaves_only,
         }
     }
 
@@ -63,7 +65,8 @@ impl TreeState {
         self
     }
 
-    /// Moves the cursor or folds, returning the node's value on Enter.
+    /// Moves the cursor or folds, returning the node's value on Enter. With
+    /// `leaves_only`, Enter on a node with children folds it instead.
     pub fn key(&mut self, code: KeyCode) -> Option<String> {
         let i = self.cursor;
         let shown = shown(&self.parents, &self.open);
@@ -93,6 +96,7 @@ impl TreeState {
                 }
             }
             KeyCode::Char(' ') if self.branches[i] => self.open[i] = !self.open[i],
+            KeyCode::Enter if self.leaves_only && self.branches[i] => self.open[i] = !self.open[i],
             KeyCode::Enter => return Some(self.values[i].clone()),
             _ => {}
         }
@@ -262,6 +266,30 @@ mod tests {
             panic!("expected select")
         };
         assert_eq!((id.as_str(), value.as_str()), ("file", "src/gen/out.rs"));
+        assert!(a.answered);
+    }
+
+    #[test]
+    fn leaves_only_enter_folds_branches_and_answers_on_leaves() {
+        use KeyCode::*;
+        let mut spec = selectable();
+        spec["leaves_only"] = json!(true);
+        let mut a = app(spec);
+        let mut term = Terminal::new(TestBackend::new(30, 12)).unwrap();
+
+        // Enter on src folds it rather than answering.
+        assert!(press(&mut a, &[Enter]).is_none());
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[1].contains("› ▸ src") && rows[2].contains("Cargo.toml"));
+        assert!(!a.answered);
+
+        // Enter unfolds src again, then on gen unfolds it, and on out.rs answers.
+        let Some(Event::Select { value, .. }) =
+            press(&mut a, &[Enter, Down, Down, Down, Down, Enter, Down, Enter])
+        else {
+            panic!("expected select")
+        };
+        assert_eq!(value, "src/gen/out.rs");
         assert!(a.answered);
     }
 

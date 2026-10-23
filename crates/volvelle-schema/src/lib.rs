@@ -677,8 +677,8 @@ pub fn result_schema(root: &Node) -> Value {
             lists.push(select_variant(id, &values));
         }
         Node::Tree(t @ TreeNode { id: Some(id), .. }) => {
-            let flat = t.flatten();
-            let values: Vec<&str> = flat.iter().map(|f| f.value.as_str()).collect();
+            let answers = t.answers();
+            let values: Vec<&str> = answers.iter().map(String::as_str).collect();
             lists.push(select_variant(id, &values));
         }
         Node::Pattern(p) => answers.push(json!({
@@ -985,6 +985,17 @@ mod tests {
         assert_eq!(
             schema["oneOf"][1]["properties"]["value"]["enum"],
             json!(values)
+        );
+    }
+
+    #[test]
+    fn leaves_only_tree_answers_with_leaves() {
+        let mut spec = tree();
+        spec["leaves_only"] = json!(true);
+        let schema = result_schema(&parse_spec(spec).unwrap());
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["value"]["enum"],
+            json!(["src/app/main.rs", "lib", "Cargo.toml"])
         );
     }
 

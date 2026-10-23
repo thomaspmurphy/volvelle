@@ -13,6 +13,10 @@ pub struct TreeNode {
     /// Title shown in a border around the tree.
     pub title: Option<String>,
     pub nodes: Vec<TreeItem>,
+    /// Only nodes without children answer. Enter on a node with children
+    /// folds or unfolds it instead.
+    #[serde(default)]
+    pub leaves_only: bool,
 }
 
 /// One node in a tree, with its children.
@@ -54,6 +58,15 @@ impl TreeNode {
         let mut out = Vec::new();
         flatten(&self.nodes, None, "", "/nodes", &mut out);
         out
+    }
+
+    /// The values Enter can answer with, in depth-first order.
+    pub fn answers(&self) -> Vec<String> {
+        self.flatten()
+            .into_iter()
+            .filter(|f| !self.leaves_only || f.item.children.is_empty())
+            .map(|f| f.value)
+            .collect()
     }
 
     /// Broken rules, each as a JSON Pointer within the tree node, a message

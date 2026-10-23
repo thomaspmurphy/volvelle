@@ -3,7 +3,7 @@
   "title": "Open a file",
   "children": [
     {"type": "text", "text": "Which file should I start with?", "tone": "accent"},
-    {"type": "tree", "id": "file", "title": "volvelle", "nodes": [
+    {"type": "tree", "id": "file", "title": "volvelle", "leaves_only": true, "nodes": [
       {"label": "crates", "children": [
         {"label": "volvelle", "children": [
           {"label": "src", "children": [

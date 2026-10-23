@@ -135,7 +135,9 @@ A `tree` holds nested `nodes`, each with a `label`, optional `detail` and
 `children`, and `open: false` to start folded. A node's value defaults to its
 path of labels joined with `/`, such as `src/app/main.rs`, and values must be
 unique. With an `id` the tree is selectable and Enter answers `select` with
-the node's value; without one it is display-only. See `examples/tree.json`.
+the node's value; without one it is display-only. With `leaves_only: true`
+only nodes without children answer, and Enter on a node with children folds
+or unfolds it. See `examples/tree.json`.
 
 ## Saved views
 
