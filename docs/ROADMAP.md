@@ -87,6 +87,9 @@ saved views gain slots and become patterns.
 - Saved views record their origin (view, pane, time), and the session log
   records each save and each render from the library, so it shows which ones
   get reused.
+- Agents save views they expect to reuse with a `save` tool and check the
+  library before composing; each entry records `by`, and an agent never
+  overwrites the user's.
 
 ### 5. Data binding
 

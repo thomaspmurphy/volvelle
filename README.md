@@ -31,8 +31,8 @@ Phase 1 of the architecture: one agent, one view.
 - `volvelle`: the viewer. `volvelle view --socket PATH [--project DIR]`
   serves specs over a Unix socket; `volvelle show spec.json` renders one
   file and prints the answer; `volvelle schema` prints the catalog schema.
-- `volvelle-mcp`: stdio MCP server with `render`, `wait_event`, `close` and
-  `library`. It splits a herdr pane for the viewer on first render.
+- `volvelle-mcp`: stdio MCP server with `render`, `wait_event`, `close`,
+  `library` and `save`. It splits a herdr pane for the viewer on first render.
 
 Not yet built: replay from the event log, the shared-state server,
 leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`, and
@@ -139,7 +139,7 @@ the node's value; without one it is display-only. See `examples/tree.json`.
 
 ## Saved views
 
-The human decides which views are worth keeping. Ctrl-S on any view,
+The human decides first which views are worth keeping. Ctrl-S on any view,
 answered or not, opens a prompt in the status line:
 
 ```text
@@ -162,12 +162,12 @@ There are two libraries, one JSON file per view:
   else `~/.local/share/volvelle/library`.
 
 A project entry shadows a user entry with the same name. Each file holds
-`name`, `spec`, `saved_at_ms`, `origin` (`view`, and the viewer's herdr
-`pane`) and a one-line `summary`, such as
+`name`, `spec`, `saved_at_ms`, `origin` (`view`, the viewer's herdr `pane`,
+and `by`, `user` or `agent`) and a one-line `summary`, such as
 `Character sheet · 3 inputs, 2 buttons, 1 tree`.
 
 The agent sees saved views through the `library` tool: with no arguments it
-lists `name`, `scope`, `summary`, `saved_at_ms` and `origin_view`; with
+lists `name`, `scope`, `summary`, `saved_at_ms`, `origin_view` and `by`; with
 `name` it returns the whole entry, `spec` included, to adapt. `render` takes
 exactly one of `spec` or `saved`:
 
@@ -177,9 +177,28 @@ exactly one of `spec` or `saved`:
 
 A saved spec is validated like any other, so one whose pattern version no
 longer exists is refused with the usual violation and
-`(from saved view "sheet")`. The session log records each save as a `saved`
-record and each render from the library with `"saved": "<name>"`, so reuse
-shows up there.
+`(from saved view "sheet")`.
+
+The agent can save too, since rendering by name costs far fewer tokens than
+sending a spec again. The server's instructions tell it to call `library`
+before composing a view that may exist, and to `save` views likely to recur,
+such as dashboards, forms and menus, but not one-off questions. `save` takes
+a `name`, exactly one of `view` (the spec last rendered under that id in the
+session) or `spec`, an optional `scope` (`project` by default), `summary`
+(generated when omitted) and `overwrite`:
+
+```json
+{"name": "ci-board", "view": "ci", "scope": "project"}
+```
+
+The human's saves stay theirs. An agent can never replace an entry with
+`by: "user"`; it is refused with a free name to use instead. Replacing the
+agent's own entry needs `overwrite: true`. Entries saved before `by` existed
+read as the user's.
+
+The session log records each save, the user's and the agent's, as a `saved`
+record with `by`, and each render from the library with `"saved": "<name>"`,
+so reuse shows up there.
 
 ## Keys
 
