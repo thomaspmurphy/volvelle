@@ -105,6 +105,52 @@ impl Viewer {
         saved
     }
 
+    /// Whether a viewer is connected and has not said goodbye. An update
+    /// must not open a fresh viewer, which would have no view to patch.
+    pub fn is_open(&self) -> bool {
+        self.conn.as_ref().is_some_and(|c| {
+            !c.held
+                .iter()
+                .any(|e| matches!(e, None | Some(Event::Closed)))
+        })
+    }
+
+    /// Sends to the viewer already connected, never starting one.
+    pub fn send_open(&mut self, req: &Request) -> anyhow::Result<()> {
+        let Some(conn) = &mut self.conn else {
+            bail!("the viewer is not running");
+        };
+        let mut line = serde_json::to_string(req)?;
+        line.push('\n');
+        conn.stream
+            .write_all(line.as_bytes())
+            .context("the viewer stopped listening")
+    }
+
+    /// Waits for the viewer to acknowledge an update to `view`, holding every
+    /// other event, answers and saves included, for later calls in order.
+    /// Returns the pointers the user's edits kept, or `None` if the viewer
+    /// closed or did not answer by `deadline`.
+    pub fn updated(&mut self, view: &str, deadline: Instant) -> Option<Vec<String>> {
+        let conn = self.conn.as_mut()?;
+        loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match conn.events.recv_timeout(wait) {
+                Ok(Some(Event::Updated { view: v, kept })) if v == view => return Some(kept),
+                Ok(ev @ (Some(Event::Closed) | None)) => {
+                    conn.held.push_back(ev);
+                    return None;
+                }
+                Ok(ev) => conn.held.push_back(ev),
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    conn.held.push_back(None);
+                    return None;
+                }
+            }
+        }
+    }
+
     pub fn recv(&mut self, deadline: Instant) -> Recv {
         let Some(conn) = &mut self.conn else {
             return Recv::Gone;

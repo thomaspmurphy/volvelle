@@ -1,0 +1,13 @@
+{
+  "hero": {
+    "title": "Ada, rogue of the third circle",
+    "name": "Ada",
+    "hp": 0.75,
+    "poisoned": false
+  },
+  "inventory": [
+    {"label": "Rope", "value": "rope", "detail": "50 ft"},
+    {"label": "Lantern", "value": "lantern", "detail": "lit"},
+    {"label": "Iron key", "value": "key", "detail": "from the crypt"}
+  ]
+}

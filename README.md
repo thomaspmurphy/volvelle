@@ -30,9 +30,9 @@ Phase 1 of the architecture: one agent, one view.
   result schema each spec answers with.
 - `volvelle`: the viewer. `volvelle view --socket PATH [--project DIR]`
   serves specs over a Unix socket; `volvelle show spec.json` renders one
-  file and prints the answer; `volvelle schema` prints the catalog schema.
-- `volvelle-mcp`: stdio MCP server with `render`, `wait_event`, `close`,
-  `library` and `save`. It splits a herdr pane for the viewer on first render.
+  file (with `--data` for its binds) and prints the answer; `volvelle schema` prints the catalog schema.
+- `volvelle-mcp`: stdio MCP server with `render`, `update`, `wait_event`,
+  `close`, `library` and `save`. It splits a herdr pane for the viewer on first render.
 
 Not yet built: replay from the event log, the shared-state server,
 leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`, and
@@ -59,11 +59,12 @@ binary.
 Each view follows one session type, checked at runtime by `volvelle-mcp`:
 
 ```text
-View = !Render . (!Render)* . ?Event . end
+View = !Render . (!Render | !Update)* . ?Event . end
 ```
 
-Render a view, re-render it as often as needed (the user's input survives for
-ids that still exist), then wait for its one answer. A call out of order is
+Render a view, re-render it or `update` its data as often as needed (the
+user's input survives for ids that still exist), then wait for its one answer.
+A display-only view takes updates until it is replaced or closed. A call out of order is
 refused with the moves allowed next, for example:
 
 ```text
@@ -105,10 +106,71 @@ at /children/1: confirm-destructive@1 must be the only interactive element in it
 
 ## Atoms
 
-`box`, `text`, `markdown`, `table`, `list`, `tree`, `input`, `select`,
-`toggle`, `button`, `progress`, `divider`. See `examples/deploy.json` and
-`volvelle schema`. Atoms state intent: the viewer owns sizing, focus order and
-colour. Ids may not contain `:`, which names a pattern's parts.
+| Atom | Holds | `bind` reads |
+| --- | --- | --- |
+| `box` | `children`, in a row or column, with an optional border and title | |
+| `text` | `text`, with `tone`, `bold` and `align` | a string |
+| `markdown` | `text` | a string |
+| `table` | `headers`, `rows`, optional `widths` | an array of rows of strings |
+| `list` | `items`; selectable with an `id` | an array of strings or `{label, value?, detail?}` |
+| `tree` | nested `nodes`; selectable with an `id` | |
+| `input` | `value`, `label`, `placeholder`, `secret`, `multiline` | a string, written back |
+| `select` | `options`, `value`, `multi` | a single select's chosen value, written back |
+| `toggle` | `value` and `label` | a boolean, written back |
+| `button` | `label` and `tone`; submits every field | |
+| `progress` | `value` from 0.0 to 1.0, `label`, `tone` | a number from 0.0 to 1.0 |
+| `divider` | an optional `title` | |
+
+See `examples/deploy.json` and `volvelle schema`. Atoms state intent: the
+viewer owns sizing, focus order and colour. Ids may not contain `:`, which
+names a pattern's parts.
+
+## Data binding
+
+An atom can read its content from a data document instead of holding it.
+`bind` is a JSON Pointer into the `data` that `render` takes alongside the
+spec, and it replaces the literal: an atom has one or the other, never both.
+The spec becomes a template, and a saved template plus `data` is the cheap
+way to draw a view again.
+
+```json
+{"view": "sheet", "saved": "sheet", "data": {"hero": {"name": "Ada", "hp": 0.75}}}
+```
+
+Every bind must resolve in `data` to the type its atom needs, and a spec with
+binds and no `data` is refused. Errors name the bind and what exists nearby:
+
+```text
+at /children/0/bind: bind "/hero/hpp" does not resolve in data; allowed: "/hero/hp", "/hero/name"
+```
+
+`update` changes the data in place with the replace, add and remove subset
+of JSON Patch. `-` as the last token of an `add` appends to an array. The
+patch is applied all or nothing, and one that fails or leaves a bind unfit is
+refused whole:
+
+```json
+{"view": "sheet", "patch": [{"op": "replace", "path": "/hero/hp", "value": 0.5},
+                            {"op": "add", "path": "/inventory/-", "value": "rope"}]}
+```
+
+The viewer redraws what the patch reaches and keeps focus, scroll and the
+user's input. A bound field the user has edited keeps their value, and the
+reply lists its pointer: `{"kept": ["/hero/name"], "next": "update, wait_event"}`.
+`update` is allowed wherever a re-render is, and is not an answer. When it
+changes the answer's type, such as a bound list's items, the reply carries
+the new `returns`.
+
+Inputs, toggles and single selects write the user's input back. On submit
+or select, `wait_event` returns `data` with each bound field's value at its
+pointer, so the answer and the state are one document; on cancel it returns
+`data` as it was. Multi selects do not bind. Ctrl-S saves the template
+without its data. See `examples/bound-sheet.json` with
+`examples/bound-sheet.data.json`:
+
+```sh
+volvelle show examples/bound-sheet.json --data examples/bound-sheet.data.json
+```
 
 ## Patterns
 
@@ -152,7 +214,8 @@ Tab switches the library, Enter saves, Esc closes the prompt, and keys typed
 there never reach the view. Names are lowercase letters, digits and hyphens
 (`[a-z0-9][a-z0-9-]{0,63}`). Saving over an existing name asks
 `overwrite "sheet"? y/n` first. What is saved is the spec as the agent
-rendered it, not what the user typed into its fields.
+rendered it, not what the user typed into its fields, and a bound spec is
+saved without its data.
 
 There are two libraries, one JSON file per view:
 
@@ -200,7 +263,8 @@ read as the user's.
 
 The session log records each save, the user's and the agent's, as a `saved`
 record with `by`, and each render from the library with `"saved": "<name>"`,
-so reuse shows up there.
+so reuse shows up there. Render records carry the view's `data`, and each
+`update` is logged with its `patch` and `kept`.
 
 ## Keys
 

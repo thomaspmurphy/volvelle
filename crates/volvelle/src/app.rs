@@ -1,12 +1,12 @@
 //! Viewer state: the current spec, what the user has entered, and focus.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value, json};
 use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
-use volvelle_schema::{Event, Item, Node, Pattern};
+use volvelle_schema::{Event, Item, Node, Op, Pattern};
 
 use crate::tree::TreeState;
 
@@ -57,7 +57,15 @@ pub enum Field {
 #[derive(Default)]
 pub struct App {
     pub view: String,
+    /// The spec as drawn, with its binds filled in from `data`.
     pub spec: Option<Node>,
+    /// The spec as the agent sent it. Ctrl-S saves this, without data.
+    pub template: Option<Node>,
+    /// The data document the binds read.
+    pub data: Option<Value>,
+    /// Bound or not, the fields the user has changed since their value last
+    /// came from the spec or data. An update leaves these alone.
+    pub edited: HashSet<String>,
     pub fields: HashMap<String, Field>,
     /// Focusable ids in tree order.
     pub order: Vec<String>,
@@ -111,8 +119,76 @@ pub struct Scroll {
 }
 
 impl App {
+    /// Renders a spec without data, as most tests do.
+    #[cfg(test)]
     pub fn render(&mut self, view: String, spec: Node) {
+        self.render_with(view, spec, None);
+    }
+
+    /// Shows a spec whose binds read `data`.
+    pub fn render_with(&mut self, view: String, spec: Node, data: Option<Value>) {
+        if view != self.view {
+            self.scroll = Scroll {
+                page: self.scroll.page,
+                ..Scroll::default()
+            };
+        }
+        self.rebuild(view, spec, data);
+        self.answered = false;
+        if matches!(self.notice, Some((_, Notice::Locked))) {
+            self.notice = None;
+        }
+    }
+
+    /// Patches the current view's data and redraws it in place. Returns the
+    /// pointers the patch touched whose fields the user had edited, which
+    /// keep the user's value.
+    pub fn update(&mut self, view: &str, patch: &[Op]) -> Vec<String> {
+        let (Some(template), Some(data)) = (&self.template, &self.data) else {
+            return Vec::new();
+        };
+        if view != self.view {
+            return Vec::new();
+        }
+        // The server applied the same patch before sending it, so this
+        // only fails if the two have drifted; the next render resets both.
+        let Ok(data) = volvelle_schema::apply_patch(data, patch) else {
+            return Vec::new();
+        };
+        let mut kept: Vec<String> = Vec::new();
+        template.walk(&mut |n| {
+            if let (Some(id), Some(at)) = (n.id(), n.bind())
+                && self.edited.contains(id)
+                && patch
+                    .iter()
+                    .any(|op| volvelle_schema::touches(op.path(), at))
+                && !kept.iter().any(|k| k == at)
+            {
+                kept.push(at.to_string());
+            }
+        });
+        self.rebuild(self.view.clone(), template.clone(), Some(data));
+        kept
+    }
+
+    /// Builds fields for a spec. On the same view, focus and what the user
+    /// entered carry over, and bound fields they have not edited take their
+    /// value from `data`.
+    fn rebuild(&mut self, view: String, template: Node, data: Option<Value>) {
         let same_view = view == self.view;
+        if !same_view {
+            self.edited.clear();
+        }
+        let spec = match &data {
+            Some(data) => volvelle_schema::resolve(&template, data),
+            None => template.clone(),
+        };
+        let mut bound = HashSet::new();
+        template.walk(&mut |n| {
+            if let (Some(id), Some(_)) = (n.id(), n.bind()) {
+                bound.insert(id.to_string());
+            }
+        });
         let focused = self.focused_id().map(str::to_string);
         let mut old = std::mem::take(&mut self.fields);
         let mut order = Vec::new();
@@ -120,6 +196,11 @@ impl App {
         spec.walk(&mut |node| {
             for (id, fresh) in parts(node) {
                 let field = match old.remove(&id) {
+                    Some(prev)
+                        if same_view && bound.contains(&id) && !self.edited.contains(&id) =>
+                    {
+                        refresh(prev, fresh)
+                    }
                     Some(prev) if same_view => carry(prev, fresh),
                     _ => fresh,
                 };
@@ -127,25 +208,18 @@ impl App {
                 fields.insert(id, field);
             }
         });
+        self.edited.retain(|id| fields.contains_key(id));
         self.focus = focused
             .filter(|_| same_view)
             .and_then(|f| order.iter().position(|id| *id == f))
             .or_else(|| start(&spec, &order))
             .unwrap_or(0);
-        if !same_view {
-            self.scroll = Scroll {
-                page: self.scroll.page,
-                ..Scroll::default()
-            };
-        }
         self.view = view;
         self.order = order;
         self.fields = fields;
         self.spec = Some(spec);
-        self.answered = false;
-        if matches!(self.notice, Some((_, Notice::Locked))) {
-            self.notice = None;
-        }
+        self.template = Some(template);
+        self.data = data;
     }
 
     pub fn focused_id(&self) -> Option<&str> {
@@ -195,26 +269,9 @@ impl App {
     pub fn values(&self) -> Map<String, Value> {
         let mut out = Map::new();
         for id in self.order.iter().filter(|id| !id.contains(':')) {
-            let value = match &self.fields[id] {
-                Field::Text { value, .. } => Value::String(value.clone()),
-                Field::Choice {
-                    chosen,
-                    multi: true,
-                    ..
-                } => Value::Array(chosen.iter().cloned().map(Value::String).collect()),
-                Field::Choice { chosen, .. } => chosen
-                    .first()
-                    .cloned()
-                    .map(Value::String)
-                    .unwrap_or(Value::Null),
-                Field::Toggle(on) => Value::Bool(*on),
-                Field::List { .. }
-                | Field::Button
-                | Field::Chooser { .. }
-                | Field::Confirm { .. }
-                | Field::Tree(_) => continue,
-            };
-            out.insert(id.clone(), value);
+            if let Some(value) = value_of(&self.fields[id]) {
+                out.insert(id.clone(), value);
+            }
         }
         out
     }
@@ -262,6 +319,7 @@ impl App {
         }
         let id = self.focused_id()?.to_string();
         let enabled = self.enabled(&id);
+        let before = self.fields.get(&id).and_then(value_of);
         let field = self.fields.get_mut(&id)?;
         match field {
             Field::Text {
@@ -459,12 +517,15 @@ impl App {
                 _ => {}
             },
         }
+        if self.fields.get(&id).and_then(value_of) != before {
+            self.edited.insert(id);
+        }
         None
     }
 
     /// Opens the save prompt on the view as it is now, answered or not.
     fn open_prompt(&mut self) {
-        let Some(spec) = &self.spec else { return };
+        let Some(spec) = &self.template else { return };
         let Some(&scope) = self.library.scopes().first() else {
             self.notice = Some((Instant::now() + SAVED_NOTICE, Notice::NoLibrary));
             return;
@@ -631,8 +692,8 @@ fn start(spec: &Node, order: &[String]) -> Option<usize> {
 fn init(node: &Node) -> Field {
     match node {
         Node::Input(n) => Field::Text {
-            cursor: n.value.chars().count(),
-            value: n.value.clone(),
+            cursor: n.value().chars().count(),
+            value: n.value().to_string(),
             top: 0,
             multiline: n.multiline,
         },
@@ -653,13 +714,73 @@ fn init(node: &Node) -> Field {
                 multi: n.multi,
             }
         }
-        Node::Toggle(n) => Field::Toggle(n.value),
+        Node::Toggle(n) => Field::Toggle(n.value()),
         Node::Tree(n) => Field::Tree(TreeState::new(n)),
         Node::List(n) => Field::List {
             cursor: 0,
-            values: n.items.iter().map(|i| Item::value(i).to_string()).collect(),
+            values: n
+                .items()
+                .iter()
+                .map(|i| Item::value(i).to_string())
+                .collect(),
         },
         _ => Field::Button,
+    }
+}
+
+/// What a field contributes to `values`, if anything.
+fn value_of(field: &Field) -> Option<Value> {
+    Some(match field {
+        Field::Text { value, .. } => Value::String(value.clone()),
+        Field::Choice {
+            chosen,
+            multi: true,
+            ..
+        } => Value::Array(chosen.iter().cloned().map(Value::String).collect()),
+        Field::Choice { chosen, .. } => chosen
+            .first()
+            .cloned()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        Field::Toggle(on) => Value::Bool(*on),
+        Field::List { .. }
+        | Field::Button
+        | Field::Chooser { .. }
+        | Field::Confirm { .. }
+        | Field::Tree(_) => return None,
+    })
+}
+
+/// A bound field the user has not edited takes its new value, keeping its
+/// cursor where it can. A cursor at the end stays at the end.
+fn refresh(prev: Field, fresh: Field) -> Field {
+    match (prev, fresh) {
+        (
+            Field::Text {
+                value: old,
+                cursor,
+                top,
+                ..
+            },
+            Field::Text {
+                value, multiline, ..
+            },
+        ) => {
+            let len = value.chars().count();
+            let cursor = if cursor >= old.chars().count() {
+                len
+            } else {
+                cursor.min(len)
+            };
+            Field::Text {
+                value,
+                cursor,
+                top,
+                multiline,
+            }
+        }
+        (prev @ Field::List { .. }, fresh @ Field::List { .. }) => carry(prev, fresh),
+        (_, fresh) => fresh,
     }
 }
 
@@ -1170,6 +1291,110 @@ mod tests {
         ctrl(&mut bare, 's');
         assert!(bare.prompt.is_none());
         assert!(matches!(bare.notice, Some((_, Notice::NoLibrary))));
+    }
+
+    fn bound() -> (Node, Value) {
+        let spec = spec(json!({"type": "box", "children": [
+            {"type": "progress", "label": "HP", "bind": "/hp"},
+            {"type": "input", "id": "name", "bind": "/name"},
+            {"type": "toggle", "id": "poisoned", "label": "Poisoned", "bind": "/poisoned"},
+            {"type": "list", "id": "bag", "bind": "/bag"},
+            {"type": "input", "id": "note"},
+            {"type": "button", "id": "ok", "label": "OK"}
+        ]}));
+        let data = json!({"hp": 0.5, "name": "Ada", "poisoned": false, "bag": ["rope", "map"]});
+        (spec, data)
+    }
+
+    fn ops(v: Value) -> Vec<Op> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn binds_fill_fields_and_drawn_atoms() {
+        let (spec, data) = bound();
+        let mut app = App::default();
+        app.render_with("s".into(), spec, Some(data));
+        assert_eq!(
+            Value::Object(app.values()),
+            json!({"name": "Ada", "poisoned": false, "note": ""})
+        );
+        let Some(Node::Box(b)) = &app.spec else {
+            panic!()
+        };
+        let Node::Progress(p) = &b.children[0] else {
+            panic!()
+        };
+        assert_eq!(p.value(), 0.5);
+        assert!(matches!(&app.fields["bag"], Field::List { values, .. } if values.len() == 2));
+    }
+
+    #[test]
+    fn updates_redraw_in_place_and_user_edits_win() {
+        let (spec, data) = bound();
+        let mut app = App::default();
+        app.render_with("s".into(), spec, Some(data));
+        type_str(&mut app, "!");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Tab);
+        type_str(&mut app, "hi");
+        app.scroll.offset = 2;
+        assert_eq!(app.edited, HashSet::from(["name".into(), "note".into()]));
+
+        let patch = ops(json!([
+            {"op": "replace", "path": "/hp", "value": 0.25},
+            {"op": "replace", "path": "/name", "value": "Grace"},
+            {"op": "replace", "path": "/poisoned", "value": true},
+            {"op": "remove", "path": "/bag/0"}
+        ]));
+        assert_eq!(app.update("s", &patch), ["/name"]);
+        assert_eq!(
+            Value::Object(app.values()),
+            json!({"name": "Ada!", "poisoned": true, "note": "hi"})
+        );
+        assert_eq!(app.focused_id(), Some("note"));
+        assert_eq!(app.scroll.offset, 2);
+        assert!(matches!(
+            &app.fields["bag"],
+            Field::List { cursor: 0, values } if values == &["map"]
+        ));
+        assert_eq!(app.data.as_ref().unwrap()["hp"], 0.25);
+        let Some(Node::Box(b)) = &app.spec else {
+            panic!()
+        };
+        let Node::Progress(p) = &b.children[0] else {
+            panic!()
+        };
+        assert_eq!(p.value(), 0.25);
+
+        // Still the user's: a later update touching it keeps it again.
+        let whole = ops(json!([{"op": "replace", "path": "", "value":
+            {"hp": 1.0, "name": "Lin", "poisoned": false, "bag": []}}]));
+        assert_eq!(app.update("s", &whole), ["/name"]);
+        assert_eq!(app.values()["poisoned"], false);
+        assert!(app.update("other", &patch).is_empty(), "another view");
+        assert!(!app.answered);
+    }
+
+    #[test]
+    fn ctrl_s_saves_a_bound_view_without_its_data() {
+        let lib = libraries("bound");
+        let mut app = App {
+            library: lib.clone(),
+            ..App::default()
+        };
+        let (spec, data) = bound();
+        app.render_with("s".into(), spec, Some(data));
+        ctrl(&mut app, 's');
+        type_str(&mut app, "sheet");
+        assert!(press(&mut app, KeyCode::Enter).is_some());
+        let (_, _, entry) = lib.load("sheet").unwrap();
+        assert_eq!(entry.spec["children"][1]["bind"], "/name");
+        assert!(entry.spec["children"][1].get("value").is_none());
+        assert!(entry.spec["children"][0].get("value").is_none());
+        cleanup(lib);
     }
 
     #[test]

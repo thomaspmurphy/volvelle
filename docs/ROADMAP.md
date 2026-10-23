@@ -91,24 +91,29 @@ saved views gain slots and become patterns.
   library before composing; each entry records `by`, and an agent never
   overwrites the user's.
 
-### 5. Data binding
+### 5. Data binding (done except save games)
 
 Specs point at data instead of embedding it, so a saved view becomes a
 template and an update is a small data change, not a whole new spec. This
 pulls paradigm 3 forward from phase 3, without the multi-agent server.
 
-- Atoms take `bind` JSON Pointers into a data document, e.g.
+- Done: atoms take `bind` JSON Pointers into a data document, e.g.
   `{"type": "progress", "label": "HP", "bind": "/hero/hp"}`; list and table
-  rows can bind to arrays.
-- `render` takes a template (inline or saved) plus a `data` document; a new
-  `update` tool changes data at pointers, and the viewer redraws only that.
-- Validation checks every pointer resolves and the value has the type the
-  atom needs, with path-level errors like the pattern rules.
-- The data document can be saved and loaded alongside views, which gives
-  long-running sessions such as a tabletop RPG a save game: the views are
-  the sheet, map and inventory, the data is the game state.
-- Fields bound to data write the user's input back to the same pointer, so
-  the answer and the state stay one thing.
+  rows bind to arrays. Each bindable atom takes a literal or a bind, not both.
+- Done: `render` takes a template (inline or saved) plus a `data` document;
+  the `update` tool patches data with replace, add and remove, all or
+  nothing, and the viewer redraws in place, keeping the user's edits and
+  reporting their pointers in `kept`.
+- Done: validation checks every pointer resolves and the value has the type
+  the atom needs, with path-level errors like the pattern rules, at render
+  and again after every patch.
+- Done: inputs, toggles and single selects write the user's input back to
+  the same pointer, so `wait_event` returns the answer and the state as one
+  document. Multi selects do not bind, and Ctrl-S saves the template without
+  its data.
+- Open (ABS-20): the data document can be saved and loaded alongside views,
+  which gives long-running sessions such as a tabletop RPG a save game: the
+  views are the sheet, map and inventory, the data is the game state.
 
 ### 6. Diagrams
 

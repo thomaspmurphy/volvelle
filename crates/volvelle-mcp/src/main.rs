@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
-use volvelle_schema::{Event, Node, PatternInfo, Request};
+use volvelle_schema::{Event, Node, Op, PatternInfo, Request};
 
 use log::{Kind, Log};
 use session::{Monitor, Refusal};
@@ -20,6 +20,8 @@ use viewer::{Recv, Viewer};
 
 const DEFAULT_WAIT_MS: u64 = 60_000;
 const MAX_WAIT_MS: u64 = 300_000;
+/// How long `update` waits for the viewer to say it applied a patch.
+const UPDATE_ACK_MS: u64 = 2_000;
 
 const INSTRUCTIONS: &str = "volvelle draws terminal UIs in a pane beside you, so you can show \
 things to the user and ask them structured questions. Compose a spec from the fixed atom \
@@ -31,7 +33,9 @@ fields or buttons is display-only and cannot be waited on. Prefer a pattern when
 it carries safe defaults and its own protocol. Saved views: call `library` before composing a \
 view that may already exist, and render by name when one fits. `save` views likely to recur \
 (dashboards, forms, sheets, menus the session will come back to), not one-off questions. A \
-saved view is static: to adapt one, fetch it with `library {name}` and send a spec.";
+saved view is static: to adapt one, fetch it with `library {name}` and send a spec. Atoms \
+can `bind` to a `data` document, `update` patches it in place, and a saved template plus \
+`data` is the cheap way to redraw.";
 
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
@@ -42,7 +46,10 @@ leaves_only makes Enter on a branch fold it instead of answering), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
 unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
 `saved`, a name from `library`; prefer `saved` when one fits, as it sends no spec. Returns the JSON Schema of the \
-eventual answer.\n\nExample: \
+eventual answer. Data binding: text, markdown, progress, list, table, input, toggle and \
+single select take `bind`, a JSON Pointer into `data`, in place of their literal (text, \
+value, items or rows). Every bind must resolve to the type its atom needs. Bound fields write \
+the user's input back into the answer's `data`; change the data later with `update`.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
 {\"type\":\"toggle\",\"id\":\"migrate\",\"label\":\"Run migrations\"},\
@@ -53,7 +60,19 @@ const WAIT_DESC: &str = "Wait for the user to answer a view: a button press (sub
 a selectable list or tree (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
 says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
-timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
+timeouts short (default 60000 ms, max 300000) and loop. One answer per render. A view \
+rendered with `data` also returns `data`: the document with the user's input written back to \
+each bound field's pointer, or as it was on cancel.";
+
+const UPDATE_DESC: &str = "Patch the data of a view rendered with `data` and redraw what is \
+bound to it in place, far cheaper than a re-render. `patch` is a JSON Patch subset: \
+replace, add (`-` appends to an array) and remove, applied all or nothing; a patch that fails \
+or leaves a bind unfit is refused whole. Focus, scroll and the user's input stay. A bound \
+field the user has edited keeps their value; `kept` lists the pointers that did. Allowed \
+wherever a re-render is, display-only views included. Does not answer the view; \
+`returns` comes back only when the answer's type changed.\n\nExample: \
+{\"view\":\"sheet\",\"patch\":[{\"op\":\"replace\",\"path\":\"/hp\",\"value\":0.4},\
+{\"op\":\"add\",\"path\":\"/inventory/-\",\"value\":\"rope\"}]}";
 
 const LIBRARY_DESC: &str = "List saved views; call it before composing a view that may already \
 exist. Each has a name, scope (project or user; project shadows user), one-line summary, when, \
@@ -72,6 +91,8 @@ struct Server {
     library: Library,
     /// The spec last rendered under each view id, for `save`.
     rendered: HashMap<String, Node>,
+    /// The data document each bound view reads, as the viewer holds it.
+    data: HashMap<String, Value>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         monitor: Monitor::default(),
         log: Log::from_env(),
         rendered: HashMap::new(),
+        data: HashMap::new(),
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -139,6 +161,7 @@ impl Server {
         }
         let outcome = match tool {
             "render" => self.render(args),
+            "update" => self.update(args),
             "wait_event" => self.wait_event(args),
             "close" => self.close(),
             "library" => self.library(args),
@@ -160,10 +183,15 @@ impl Server {
             .map_err(|r| self.refuse(Some(&view), r))?;
         let (spec, saved) =
             spec_arg(&self.library, args).inspect_err(|e| self.log_error(Some(&view), e))?;
+        let data = data_arg(args).inspect_err(|e| self.log_error(Some(&view), e))?;
+        let shown = volvelle_schema::bind(&spec, data.as_ref())
+            .map_err(|e| format!("invalid data: {e}"))
+            .inspect_err(|e| self.log_error(Some(&view), e))?;
         let interactive = has_answer(&spec);
         let pattern = pattern_of(&spec);
         let reports = self.monitor.owes(&view);
-        let returns = volvelle_schema::result_schema(&spec);
+        let bound = has_binds(&spec);
+        let returns = returns(&shown, bound);
         // Anything already queued answers an earlier render.
         for ev in self.viewer.drain() {
             match ev {
@@ -177,11 +205,21 @@ impl Server {
             .send(&Request::Render {
                 view: view.clone(),
                 spec: spec.clone(),
+                data: data.clone(),
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
         self.rendered.insert(view.clone(), spec);
         let mut body = vec![("spec", spec_json), ("interactive", interactive.into())];
+        match data {
+            Some(data) => {
+                body.push(("data", data.clone()));
+                self.data.insert(view.clone(), data);
+            }
+            None => {
+                self.data.remove(&view);
+            }
+        }
         if reports {
             body.push(("reports_outcome", true.into()));
         }
@@ -190,11 +228,92 @@ impl Server {
         }
         self.log.record(Kind::Render, Some(&view), &body);
         self.monitor.rendered(&view, interactive, pattern);
-        Ok(if interactive {
-            json!({"view": view, "returns": returns, "next": "wait_event"})
-        } else {
-            json!({"view": view, "display_only": true, "next": "render to update, close when done"})
+        Ok(match (interactive, bound) {
+            (true, false) => json!({"view": view, "returns": returns, "next": "wait_event"}),
+            (true, true) => {
+                json!({"view": view, "returns": returns, "next": "update, wait_event"})
+            }
+            (false, false) => {
+                json!({"view": view, "display_only": true, "next": "render to update, close when done"})
+            }
+            (false, true) => {
+                json!({"view": view, "display_only": true, "next": "update, render, close when done"})
+            }
         })
+    }
+
+    /// Patches a bound view's data in place. The patch is applied to the
+    /// server's copy and the binds re-checked first, so a refused patch
+    /// changes nothing on either side.
+    fn update(&mut self, args: &Value) -> Result<Value, String> {
+        let view = view_arg(args).inspect_err(|e| self.log_error(None, e))?;
+        let next = self
+            .monitor
+            .check_update(&view)
+            .map_err(|r| self.refuse(Some(&view), r))?;
+        let result = self.patched(&view, args);
+        let (patch, data) = result.inspect_err(|e| self.log_error(Some(&view), e))?;
+        if !self.viewer.is_open() {
+            self.monitor.closed();
+            let why = format!("view {view:?} was closed; allowed next: render");
+            return Err(self.refuse(Some(&view), Refusal(why)));
+        }
+        let spec = &self.rendered[&view];
+        let before =
+            volvelle_schema::result_schema(&volvelle_schema::resolve(spec, &self.data[&view]));
+        let shown = volvelle_schema::resolve(spec, &data);
+        let changed = has_answer(spec) && volvelle_schema::result_schema(&shown) != before;
+        let returns = returns(&shown, true);
+        self.viewer
+            .send_open(&Request::Update {
+                view: view.clone(),
+                patch: patch.clone(),
+            })
+            .map_err(|e| format!("{e:#}; allowed next: render"))
+            .inspect_err(|e| self.log_error(Some(&view), e))?;
+        // The viewer has the patch whether or not it answers in time, so the
+        // server's copy follows it either way.
+        self.data.insert(view.clone(), data);
+        let deadline = Instant::now() + Duration::from_millis(UPDATE_ACK_MS);
+        let Some(kept) = self.viewer.updated(&view, deadline) else {
+            let why = "the viewer did not acknowledge the update; allowed next: render";
+            self.log_error(Some(&view), why);
+            return Err(why.into());
+        };
+        let patch_json = serde_json::to_value(&patch).unwrap_or(Value::Null);
+        let body = [("patch", patch_json), ("kept", json!(kept))];
+        self.log.record(Kind::Update, Some(&view), &body);
+        let mut out = json!({"view": view, "kept": kept, "next": next});
+        if changed {
+            out["returns"] = returns;
+        }
+        Ok(out)
+    }
+
+    /// The patch and the data it makes, refused whole if any op fails or a
+    /// bind no longer fits.
+    fn patched(&self, view: &str, args: &Value) -> Result<(Vec<Op>, Value), String> {
+        let Some(data) = self.data.get(view) else {
+            return Err(format!(
+                "view {view:?} was rendered without `data`, so there is nothing to patch; \
+                 allowed next: render with `data`"
+            ));
+        };
+        let patch: Vec<Op> = serde_json::from_value(args["patch"].clone()).map_err(|e| {
+            format!(
+                "invalid patch: {e}; allowed: an array of {{op: replace|add|remove, path, value}}"
+            )
+        })?;
+        let data = volvelle_schema::apply_patch(data, &patch)
+            .map_err(|v| format!("invalid patch: {v}"))?;
+        volvelle_schema::check_binds(&self.rendered[view], Some(&data)).map_err(|errors| {
+            let lines: Vec<String> = errors
+                .iter()
+                .map(|v| format!("invalid patch: {v}"))
+                .collect();
+            lines.join("\n")
+        })?;
+        Ok((patch, data))
     }
 
     fn wait_event(&mut self, args: &Value) -> Result<Value, String> {
@@ -211,7 +330,10 @@ impl Server {
             match self.viewer.recv(deadline) {
                 Recv::Event(ev @ Event::Saved { .. }) => self.log_saved(&ev),
                 Recv::Event(ev) => {
-                    if let Some(answer) = self.monitor.accept(&view, &ev) {
+                    if let Some(mut answer) = self.monitor.accept(&view, &ev) {
+                        if let Some(data) = self.answered_data(&view, &ev) {
+                            answer["data"] = data;
+                        }
                         let mut body = vec![("answer", answer.clone())];
                         if self.monitor.owes(&view) {
                             body.push(("owes", "report_outcome".into()));
@@ -242,6 +364,16 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// A bound view's data as the answer leaves it: the user's input written
+    /// back to each bound field's pointer, or untouched on cancel.
+    fn answered_data(&self, view: &str, ev: &Event) -> Option<Value> {
+        let data = self.data.get(view)?;
+        Some(match (ev, ev.values()) {
+            (Event::Cancel { .. }, _) | (_, None) => data.clone(),
+            (_, Some(values)) => volvelle_schema::write_back(&self.rendered[view], data, values),
+        })
     }
 
     fn close(&mut self) -> Result<Value, String> {
@@ -471,6 +603,37 @@ fn spec_arg(library: &Library, args: &Value) -> Result<(Node, Option<String>), S
     }
 }
 
+/// The optional data document for a spec's binds, which must be an object.
+fn data_arg(args: &Value) -> Result<Option<Value>, String> {
+    match args.get("data").filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(data @ Value::Object(_)) => Ok(Some(data.clone())),
+        Some(_) => Err(
+            "`data` must be a JSON object; allowed: an object such as {\"hero\": {\"hp\": 0.5}}"
+                .into(),
+        ),
+    }
+}
+
+/// Whether any atom in the spec binds into data.
+fn has_binds(spec: &Node) -> bool {
+    let mut found = false;
+    spec.walk(&mut |n| found |= n.bind().is_some());
+    found
+}
+
+/// The answer's schema for a spec as drawn. A bound view's answers also
+/// carry `data`, so each variant gains it.
+fn returns(shown: &Node, bound: bool) -> Value {
+    let mut schema = volvelle_schema::result_schema(shown);
+    if bound {
+        for variant in schema["oneOf"].as_array_mut().into_iter().flatten() {
+            variant["properties"]["data"] = json!({"type": "object"});
+        }
+    }
+    schema
+}
+
 /// Whether anything in the spec can produce an answer.
 fn has_answer(spec: &Node) -> bool {
     let mut found = false;
@@ -495,6 +658,29 @@ fn tools() -> Value {
             "name": "render",
             "description": render_description(),
             "inputSchema": render_schema(),
+        },
+        {
+            "name": "update",
+            "description": UPDATE_DESC,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": {"type": "string"},
+                    "patch": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {"enum": ["replace", "add", "remove"]},
+                                "path": {"type": "string", "description": "A JSON Pointer into the view's data."},
+                                "value": {"description": "For replace and add."}
+                            },
+                            "required": ["op", "path"]
+                        }
+                    }
+                },
+                "required": ["view", "patch"]
+            }
         },
         {
             "name": "wait_event",
@@ -613,7 +799,8 @@ fn render_schema() -> Value {
         "properties": {
             "view": {"type": "string", "description": "Names this view. Reuse it to update the view in place."},
             "spec": {"$ref": "#/$defs/Node"},
-            "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."}
+            "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."},
+            "data": {"type": "object", "description": "The document the spec's `bind` pointers read. Required when the spec binds."}
         },
         "required": ["view"],
         "$defs": defs
@@ -717,6 +904,7 @@ mod tests {
             log: Log::new(root.join("log"), None),
             library: library(&root),
             rendered: HashMap::new(),
+            data: HashMap::new(),
         };
         let text = |v: &Value| v["content"][0]["text"].as_str().unwrap().to_string();
 
@@ -789,6 +977,7 @@ mod tests {
             log: Log::new(root.join("log"), None),
             library,
             rendered: HashMap::new(),
+            data: HashMap::new(),
         };
         (server, fake)
     }
@@ -968,6 +1157,273 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A server whose fake viewer answers its i-th request with the lines
+    /// in `replies[i]`, then hands back every request it took.
+    fn scripted(
+        root: &std::path::Path,
+        replies: Vec<Vec<Value>>,
+    ) -> (Server, std::thread::JoinHandle<Vec<Value>>) {
+        fs::create_dir_all(root).unwrap();
+        let socket = root.join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let fake = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+            let mut w = stream;
+            let mut requests = Vec::new();
+            for reply in replies {
+                let line = lines.next().unwrap().unwrap();
+                requests.push(serde_json::from_str(&line).unwrap());
+                for ev in reply {
+                    writeln!(w, "{ev}").unwrap();
+                }
+            }
+            requests
+        });
+        let server = Server {
+            viewer: Viewer::at(socket, None),
+            monitor: Monitor::default(),
+            log: Log::new(root.join("log"), None),
+            library: library(root),
+            rendered: HashMap::new(),
+            data: HashMap::new(),
+        };
+        (server, fake)
+    }
+
+    fn hero() -> Value {
+        json!({"type": "box", "title": "Hero", "children": [
+            {"type": "progress", "label": "HP", "bind": "/hp"},
+            {"type": "input", "id": "name", "label": "Name", "bind": "/name"},
+            {"type": "list", "id": "bag", "bind": "/bag"},
+            {"type": "button", "id": "ok", "label": "OK"}
+        ]})
+    }
+
+    fn hero_data() -> Value {
+        json!({"hp": 0.5, "name": "Ada", "bag": ["rope", "map"]})
+    }
+
+    #[test]
+    fn a_saved_template_renders_with_data() {
+        let root = temp("bind-render");
+        let (mut server, fake) = scripted(&root, vec![vec![]]);
+        let spec = volvelle_schema::parse_spec(hero()).unwrap();
+        let origin = Origin {
+            view: String::new(),
+            pane: None,
+            by: By::Agent,
+        };
+        let lib = &server.library;
+        lib.save(Scope::User, &Entry::new("hero", &spec, origin))
+            .unwrap();
+
+        let args = json!({"view": "h", "saved": "hero", "data": hero_data()});
+        let rendered = reply(&server.call("render", &args)).unwrap();
+        let variants = rendered["returns"]["oneOf"].as_array().unwrap();
+        assert!(
+            variants
+                .iter()
+                .all(|v| v["properties"]["data"] == json!({"type": "object"}))
+        );
+        assert_eq!(
+            variants[2]["properties"]["value"]["enum"],
+            json!(["rope", "map"]),
+            "a bound list's items reach the answer's type"
+        );
+        let requests = fake.join().unwrap();
+        assert_eq!(requests[0]["data"], hero_data());
+        assert_eq!(requests[0]["spec"]["children"][1]["bind"], "/name");
+        assert_eq!(server.data["h"], hero_data());
+
+        let render = records(&root)
+            .into_iter()
+            .find(|r| r["kind"] == "render")
+            .unwrap();
+        assert_eq!(
+            (&render["saved"], &render["data"]),
+            (&json!("hero"), &hero_data())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn binds_are_checked_against_data_before_rendering() {
+        let root = temp("bind-refuse");
+        let (mut server, _fake) = scripted(&root, vec![vec![]]);
+        let refused =
+            |server: &mut Server, args: Value| reply(&server.call("render", &args)).unwrap_err();
+        assert_eq!(
+            refused(&mut server, json!({"view": "h", "spec": hero()})),
+            "invalid data: at /children/0/bind: the spec binds 3 pointers but render has no \
+             `data`; allowed: `data` with a document, literals instead of binds"
+        );
+        assert_eq!(
+            refused(
+                &mut server,
+                json!({"view": "h", "spec": hero(), "data": [1]})
+            ),
+            "`data` must be a JSON object; allowed: an object such as {\"hero\": {\"hp\": 0.5}}"
+        );
+        let data = json!({"hp": 2, "name": "Ada", "bag": []});
+        assert_eq!(
+            refused(
+                &mut server,
+                json!({"view": "h", "spec": hero(), "data": data})
+            ),
+            "invalid data: at /children/0/bind: bind \"/hp\" holds 2, but progress needs a \
+             number from 0.0 to 1.0; allowed: a number from 0.0 to 1.0"
+        );
+        assert!(server.data.is_empty() && server.rendered.is_empty());
+        let plain = json!({"view": "p", "spec": {"type": "text", "text": "hi"}, "data": {"a": 1}});
+        let shown = reply(&server.call("render", &plain)).unwrap();
+        assert_eq!(
+            shown["display_only"], true,
+            "data without binds is harmless"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn updates_patch_data_atomically_and_pass_kept_through() {
+        let root = temp("bind-update");
+        let submit = json!({"type": "submit", "view": "h", "button": "ok",
+                            "values": {"name": "Ada!"}});
+        let ack = json!({"type": "updated", "view": "h", "kept": ["/name"]});
+        let (mut server, fake) = scripted(&root, vec![vec![], vec![submit, ack]]);
+        let update = |server: &mut Server, patch: Value| {
+            reply(&server.call("update", &json!({"view": "h", "patch": patch})))
+        };
+        let good = json!([
+            {"op": "replace", "path": "/hp", "value": 0.25},
+            {"op": "replace", "path": "/name", "value": "Grace"}
+        ]);
+        assert_eq!(
+            update(&mut server, good.clone()).unwrap_err(),
+            "no view \"h\" has been rendered; allowed next: render"
+        );
+        let args = json!({"view": "h", "spec": hero(), "data": hero_data()});
+        reply(&server.call("render", &args)).unwrap();
+
+        let failing = json!([
+            {"op": "replace", "path": "/hp", "value": 0.1},
+            {"op": "replace", "path": "/mp", "value": 1}
+        ]);
+        assert_eq!(
+            update(&mut server, failing).unwrap_err(),
+            "invalid patch: at /patch/1: nothing at \"/mp\" to replace; allowed: add, an existing path"
+        );
+        let unfit = json!([{"op": "replace", "path": "/hp", "value": "full"}]);
+        assert_eq!(
+            update(&mut server, unfit).unwrap_err(),
+            "invalid patch: at /children/0/bind: bind \"/hp\" holds \"full\", but progress \
+             needs a number from 0.0 to 1.0; allowed: a number from 0.0 to 1.0"
+        );
+        let removed = json!([{"op": "remove", "path": "/bag"}]);
+        assert!(
+            update(&mut server, removed)
+                .unwrap_err()
+                .contains("bind \"/bag\" does not resolve in data")
+        );
+        assert!(
+            update(&mut server, json!([{"op": "move", "path": "/hp"}]))
+                .unwrap_err()
+                .starts_with("invalid patch: unknown variant `move`")
+        );
+        assert_eq!(
+            server.data["h"],
+            hero_data(),
+            "refused patches change nothing"
+        );
+
+        let updated = update(&mut server, good.clone()).unwrap();
+        assert_eq!(
+            updated,
+            json!({"view": "h", "kept": ["/name"], "next": "update, wait_event"})
+        );
+        assert_eq!(server.data["h"]["hp"], 0.25);
+        let requests = fake.join().unwrap();
+        assert_eq!(requests.len(), 2, "refused patches never reach the viewer");
+        assert_eq!(
+            (&requests[1]["op"], &requests[1]["patch"]),
+            (&json!("update"), &good)
+        );
+
+        // The answer that arrived before the acknowledgement was held for
+        // wait_event, and writes the user's input back into the patched data.
+        let answer = server.call("wait_event", &json!({"view": "h", "timeout_ms": 5000}));
+        let answer = reply(&answer).unwrap();
+        assert_eq!(answer["type"], "submit");
+        assert_eq!(
+            answer["data"],
+            json!({"hp": 0.25, "name": "Ada!", "bag": ["rope", "map"]})
+        );
+
+        let recs = records(&root);
+        let kinds: Vec<&str> = recs.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "start", "refusal", "render", "error", "error", "error", "error", "update",
+                "answer"
+            ]
+        );
+        assert_eq!(
+            (&recs[7]["view"], &recs[7]["patch"], &recs[7]["kept"]),
+            (&json!("h"), &good, &json!(["/name"]))
+        );
+        assert_eq!(recs[8]["answer"]["data"]["name"], "Ada!");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn display_views_take_updates_until_closed() {
+        let root = temp("bind-display");
+        let ack = json!({"type": "updated", "view": "d", "kept": []});
+        let (mut server, fake) = scripted(&root, vec![vec![], vec![ack], vec![]]);
+        let spec = json!({"type": "progress", "label": "Build", "bind": "/done"});
+        let args = json!({"view": "d", "spec": spec, "data": {"done": 0.1}});
+        let shown = reply(&server.call("render", &args)).unwrap();
+        assert_eq!(shown["next"], "update, render, close when done");
+        let patch = json!([{"op": "replace", "path": "/done", "value": 0.9}]);
+        let args = json!({"view": "d", "patch": patch});
+        assert_eq!(
+            reply(&server.call("update", &args)).unwrap(),
+            json!({"view": "d", "kept": [], "next": "update, render, close when done"})
+        );
+        reply(&server.call("close", &json!({}))).unwrap();
+        assert_eq!(
+            reply(&server.call("update", &args)).unwrap_err(),
+            "view \"d\" was closed; allowed next: render"
+        );
+        assert_eq!(fake.join().unwrap()[2]["op"], "close");
+
+        let plain = json!({"view": "p", "spec": {"type": "text", "text": "hi"}});
+        let (mut server, _fake) = scripted(&root.join("plain"), vec![vec![]]);
+        reply(&server.call("render", &plain)).unwrap();
+        assert_eq!(
+            reply(&server.call("update", &json!({"view": "p", "patch": []}))).unwrap_err(),
+            "view \"p\" was rendered without `data`, so there is nothing to patch; \
+             allowed next: render with `data`"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_cancel_returns_the_data_without_the_users_input() {
+        let root = temp("bind-cancel");
+        let cancel = json!({"type": "cancel", "view": "h", "values": {"name": "Ada!"}});
+        let (mut server, _fake) = scripted(&root, vec![vec![cancel]]);
+        let args = json!({"view": "h", "spec": hero(), "data": hero_data()});
+        reply(&server.call("render", &args)).unwrap();
+        let answer = server.call("wait_event", &json!({"view": "h", "timeout_ms": 5000}));
+        let answer = reply(&answer).unwrap();
+        assert_eq!(answer["type"], "cancel");
+        assert_eq!(answer["values"]["name"], "Ada!");
+        assert_eq!(answer["data"], hero_data());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn render_description_lists_every_pattern() {
         let desc = render_description();
@@ -993,6 +1449,9 @@ mod tests {
             .iter()
             .map(|t| t["name"].clone())
             .collect();
-        assert_eq!(names, ["render", "wait_event", "close", "library", "save"]);
+        assert_eq!(
+            names,
+            ["render", "update", "wait_event", "close", "library", "save"]
+        );
     }
 }

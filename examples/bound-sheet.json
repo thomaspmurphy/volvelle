@@ -1,0 +1,15 @@
+{
+  "type": "box",
+  "title": "Character sheet",
+  "children": [
+    {"type": "text", "bind": "/hero/title", "tone": "accent", "bold": true},
+    {"type": "progress", "label": "HP", "bind": "/hero/hp", "tone": "success"},
+    {"type": "input", "id": "name", "label": "Name", "bind": "/hero/name"},
+    {"type": "toggle", "id": "poisoned", "label": "Poisoned", "bind": "/hero/poisoned"},
+    {"type": "list", "id": "item", "title": "Inventory", "bind": "/inventory"},
+    {"type": "box", "direction": "row", "children": [
+      {"type": "button", "id": "save", "label": "Save", "tone": "accent"},
+      {"type": "button", "id": "rest", "label": "Rest"}
+    ]}
+  ]
+}

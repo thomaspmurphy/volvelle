@@ -330,8 +330,8 @@ pub fn summary(spec: &Node) -> String {
                 return;
             }
             let text = match n {
-                Node::Text(t) => &t.text,
-                Node::Markdown(m) => &m.text,
+                Node::Text(t) => t.text(),
+                Node::Markdown(m) => m.text(),
                 _ => return,
             };
             first = text

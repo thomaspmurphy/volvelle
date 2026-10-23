@@ -14,8 +14,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod bind;
 pub mod library;
+mod patch;
 mod tree;
+pub use bind::{bind, check_binds, resolve, write_back};
+pub use patch::{Op, apply_patch, touches};
 pub use tree::{Flat, TreeItem, TreeNode};
 
 /// One component in the UI tree.
@@ -98,7 +102,9 @@ pub struct BoxNode {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TextNode {
-    pub text: String,
+    pub text: Option<String>,
+    /// A JSON Pointer to a string in the data document, in place of `text`.
+    pub bind: Option<String>,
     #[serde(default)]
     pub tone: Tone,
     #[serde(default)]
@@ -110,7 +116,9 @@ pub struct TextNode {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MarkdownNode {
-    pub text: String,
+    pub text: Option<String>,
+    /// A JSON Pointer to a string in the data document, in place of `text`.
+    pub bind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -118,7 +126,10 @@ pub struct MarkdownNode {
 pub struct TableNode {
     pub title: Option<String>,
     pub headers: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub rows: Option<Vec<Vec<String>>>,
+    /// A JSON Pointer to an array of rows in the data document, in place of
+    /// `rows`.
+    pub bind: Option<String>,
     /// Relative column widths, one per header. Equal widths if omitted.
     pub widths: Option<Vec<u16>>,
 }
@@ -166,7 +177,10 @@ pub struct ListNode {
     /// Makes the list selectable. Enter emits `select` with the item's value.
     pub id: Option<String>,
     pub title: Option<String>,
-    pub items: Vec<Item>,
+    pub items: Option<Vec<Item>>,
+    /// A JSON Pointer to an array of items in the data document, in place of
+    /// `items`.
+    pub bind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -176,8 +190,10 @@ pub struct InputNode {
     pub label: Option<String>,
     pub placeholder: Option<String>,
     /// Initial text.
-    #[serde(default)]
-    pub value: String,
+    pub value: Option<String>,
+    /// A JSON Pointer to a string in the data document, in place of `value`.
+    /// Submitting writes the text back there.
+    pub bind: Option<String>,
     /// Mask the text, for passwords and tokens.
     #[serde(default)]
     pub secret: bool,
@@ -199,6 +215,10 @@ pub struct SelectNode {
     /// Initially chosen option values.
     #[serde(default)]
     pub value: Vec<String>,
+    /// A JSON Pointer to the chosen option's value in the data document, in
+    /// place of `value`. Single selects only; submitting writes the choice
+    /// back there.
+    pub bind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -206,8 +226,10 @@ pub struct SelectNode {
 pub struct ToggleNode {
     pub id: String,
     pub label: String,
-    #[serde(default)]
-    pub value: bool,
+    pub value: Option<bool>,
+    /// A JSON Pointer to a boolean in the data document, in place of
+    /// `value`. Submitting writes the state back there.
+    pub bind: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -224,7 +246,10 @@ pub struct ButtonNode {
 pub struct ProgressNode {
     pub label: Option<String>,
     /// From 0.0 to 1.0.
-    pub value: f64,
+    pub value: Option<f64>,
+    /// A JSON Pointer to a number from 0.0 to 1.0 in the data document, in
+    /// place of `value`.
+    pub bind: Option<String>,
     #[serde(default)]
     pub tone: Tone,
 }
@@ -233,6 +258,50 @@ pub struct ProgressNode {
 #[serde(deny_unknown_fields)]
 pub struct DividerNode {
     pub title: Option<String>,
+}
+
+// Content as drawn. A bound atom has it once [`resolve`] has filled it in.
+
+impl TextNode {
+    pub fn text(&self) -> &str {
+        self.text.as_deref().unwrap_or_default()
+    }
+}
+
+impl MarkdownNode {
+    pub fn text(&self) -> &str {
+        self.text.as_deref().unwrap_or_default()
+    }
+}
+
+impl TableNode {
+    pub fn rows(&self) -> &[Vec<String>] {
+        self.rows.as_deref().unwrap_or_default()
+    }
+}
+
+impl ListNode {
+    pub fn items(&self) -> &[Item] {
+        self.items.as_deref().unwrap_or_default()
+    }
+}
+
+impl InputNode {
+    pub fn value(&self) -> &str {
+        self.value.as_deref().unwrap_or_default()
+    }
+}
+
+impl ToggleNode {
+    pub fn value(&self) -> bool {
+        self.value.unwrap_or_default()
+    }
+}
+
+impl ProgressNode {
+    pub fn value(&self) -> f64 {
+        self.value.unwrap_or_default()
+    }
 }
 
 /// A pattern instance, tagged by its versioned name. Slots are plain data,
@@ -419,6 +488,21 @@ impl Node {
         }
     }
 
+    /// The data pointer a bound atom reads, if it has one.
+    pub fn bind(&self) -> Option<&str> {
+        match self {
+            Node::Text(n) => n.bind.as_deref(),
+            Node::Markdown(n) => n.bind.as_deref(),
+            Node::Table(n) => n.bind.as_deref(),
+            Node::List(n) => n.bind.as_deref(),
+            Node::Input(n) => n.bind.as_deref(),
+            Node::Select(n) => n.bind.as_deref(),
+            Node::Toggle(n) => n.bind.as_deref(),
+            Node::Progress(n) => n.bind.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn children(&self) -> &[Node] {
         match self {
             Node::Box(b) => &b.children,
@@ -507,6 +591,7 @@ pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
             }
             interactive.push((path.to_string(), id));
         }
+        bind::literals(node, path, &mut errors);
         match node {
             Node::Select(s) => {
                 if s.options.is_empty() {
@@ -554,10 +639,10 @@ pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
                     ));
                 }
             }
-            Node::Progress(p) if !(0.0..=1.0).contains(&p.value) => {
+            Node::Progress(ProgressNode { value: Some(v), .. }) if !(0.0..=1.0).contains(v) => {
                 errors.push(Violation::new(
                     format!("{path}/value"),
-                    format!("progress value {} is outside 0.0..=1.0", p.value),
+                    format!("progress value {v} is outside 0.0..=1.0"),
                     &["a value from 0.0 to 1.0"],
                 ));
             }
@@ -668,12 +753,8 @@ pub fn result_schema(root: &Node) -> Value {
             fields.insert(n.id.clone(), json!({"type": "boolean"}));
         }
         Node::Button(n) => buttons.push(n.id.clone()),
-        Node::List(ListNode {
-            id: Some(id),
-            items,
-            ..
-        }) => {
-            let values: Vec<&str> = items.iter().map(Item::value).collect();
+        Node::List(l @ ListNode { id: Some(id), .. }) => {
+            let values: Vec<&str> = l.items().iter().map(Item::value).collect();
             lists.push(select_variant(id, &values));
         }
         Node::Tree(t @ TreeNode { id: Some(id), .. }) => {
@@ -739,7 +820,18 @@ pub enum Request {
     /// Show a spec as the named view. Re-rendering the same view keeps what
     /// the user has typed or chosen in fields whose ids survive, so nothing
     /// moves under them. A different view name starts from the spec's values.
-    Render { view: String, spec: Node },
+    /// `data` fills the spec's binds; a bound field the user has not edited
+    /// takes its value from it.
+    Render {
+        view: String,
+        spec: Node,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<Value>,
+    },
+    /// Apply a patch to the view's data and redraw what is bound to it,
+    /// keeping focus, scroll and any bound field the user has edited. The
+    /// viewer acknowledges with [`Event::Updated`].
+    Update { view: String, patch: Vec<Op> },
     /// Quit the viewer.
     Close,
 }
@@ -782,8 +874,25 @@ pub enum Event {
         scope: library::Scope,
         path: String,
     },
+    /// The viewer applied an update. `kept` lists the pointers of bound
+    /// fields the update touched but the user had edited, so their values
+    /// stayed. Not an answer.
+    Updated { view: String, kept: Vec<String> },
     /// The viewer is shutting down.
     Closed,
+}
+
+impl Event {
+    /// The field values an answer carries.
+    pub fn values(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Event::Submit { values, .. }
+            | Event::Select { values, .. }
+            | Event::Answer { values, .. }
+            | Event::Cancel { values, .. } => Some(values),
+            Event::Saved { .. } | Event::Updated { .. } | Event::Closed => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -947,6 +1056,10 @@ mod tests {
         ] {
             parse_spec(serde_json::from_str(example).unwrap()).unwrap();
         }
+        let sheet = include_str!("../../../examples/bound-sheet.json");
+        let data = include_str!("../../../examples/bound-sheet.data.json");
+        let sheet = parse_spec(serde_json::from_str(sheet).unwrap()).unwrap();
+        bind(&sheet, Some(&serde_json::from_str(data).unwrap())).unwrap();
     }
 
     #[test]

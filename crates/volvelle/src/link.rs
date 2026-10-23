@@ -11,7 +11,7 @@ use std::thread;
 use volvelle_schema::{Event, Request};
 
 pub enum Msg {
-    Request(Request),
+    Request(Box<Request>),
     Connected(u64, UnixStream),
     Disconnected(u64),
 }
@@ -38,7 +38,7 @@ pub fn listen(path: &Path, tx: Sender<Msg>) -> anyhow::Result<()> {
                     }
                     // Clients validate before sending; a malformed line is dropped.
                     if let Ok(req) = serde_json::from_str::<Request>(&line) {
-                        let _ = tx.send(Msg::Request(req));
+                        let _ = tx.send(Msg::Request(Box::new(req)));
                     }
                 }
                 let _ = tx.send(Msg::Disconnected(conn));
