@@ -357,4 +357,56 @@ mod tests {
         assert!(got.get("next").is_none());
         assert!(m.check_close().is_ok());
     }
+
+    /// The id a state goes by in examples/session-types.json. The match has
+    /// no wildcard, so a new state does not compile until it is named here.
+    fn state_id(s: &State) -> &'static str {
+        match s {
+            State::Awaiting => "awaiting",
+            State::Display => "display",
+            State::Answered(_) => "answered",
+            State::Owes(_) => "owes",
+            State::Replaced(_) => "replaced",
+            State::Closed => "closed",
+        }
+    }
+
+    #[test]
+    fn session_types_example_draws_every_monitor_state() {
+        let all = [
+            State::Awaiting,
+            State::Display,
+            State::Answered(Value::Null),
+            State::Owes(Value::Null),
+            State::Replaced(String::new()),
+            State::Closed,
+        ];
+        let mut ids: Vec<&str> = all.iter().map(state_id).collect();
+        ids.sort();
+        let example: Value =
+            serde_json::from_str(include_str!("../../../examples/session-types.json")).unwrap();
+        let machines: Vec<&Value> = example["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["name"] == "state-machine@1")
+            .collect();
+        assert_eq!(machines.len(), 2);
+        let states = |m: &Value| -> Vec<String> {
+            let mut s: Vec<String> = m["states"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["id"].as_str().unwrap().to_string())
+                .collect();
+            s.sort();
+            s
+        };
+        assert_eq!(states(machines[0]), ids, "the view lifecycle");
+        let confirm = states(machines[1]);
+        assert!(
+            confirm.iter().all(|s| ids.contains(&s.as_str())),
+            "the confirm-destructive protocol uses monitor states: {confirm:?}"
+        );
+    }
 }

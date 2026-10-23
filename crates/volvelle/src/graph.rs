@@ -461,4 +461,27 @@ mod tests {
         };
         assert_eq!(g.ids[g.cursor], "queued", "not the entry point");
     }
+
+    #[test]
+    fn session_types_example_draws_both_machines() {
+        let spec: Value =
+            serde_json::from_str(include_str!("../../../examples/session-types.json")).unwrap();
+        let mut a = app(spec);
+        assert!(!a.awaiting_input());
+        let mut term = Terminal::new(TestBackend::new(100, 60)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        let text = rows.join("\n");
+        for want in [
+            "╭ View lifecycle",
+            "╭ confirm-destructive@1",
+            "│ ● │",
+            "│ Awaiting │",
+            "│ Display ◉ │",
+            "│ Answered ◉ │",
+            "│ Replaced │",
+        ] {
+            assert!(text.contains(want), "{want}:\n{text}");
+        }
+        assert_eq!(style_of(&term, "Awaiting").fg, Some(Color::Cyan));
+    }
 }
