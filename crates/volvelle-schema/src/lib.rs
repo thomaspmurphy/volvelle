@@ -1056,6 +1056,10 @@ mod tests {
         ] {
             parse_spec(serde_json::from_str(example).unwrap()).unwrap();
         }
+        let sheet = include_str!("../../../examples/bound-sheet.json");
+        let data = include_str!("../../../examples/bound-sheet.data.json");
+        let sheet = parse_spec(serde_json::from_str(sheet).unwrap()).unwrap();
+        bind(&sheet, Some(&serde_json::from_str(data).unwrap())).unwrap();
     }
 
     #[test]
