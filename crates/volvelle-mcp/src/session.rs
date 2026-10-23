@@ -135,8 +135,9 @@ impl Monitor {
                 self.closed();
                 return None;
             }
-            // Saving is the human keeping a view, not answering it.
-            Event::Saved { .. } => return None,
+            // Saving is the human keeping a view, not answering it, and an
+            // update's acknowledgement answers nothing either.
+            Event::Saved { .. } | Event::Updated { .. } => return None,
         };
         if answered != view || self.views.get(view) != Some(&State::Awaiting) {
             return None;

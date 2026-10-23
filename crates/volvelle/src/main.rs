@@ -42,6 +42,9 @@ enum Cmd {
         spec: PathBuf,
         #[arg(long, default_value = "main")]
         view: String,
+        /// A JSON data document for the spec's binds.
+        #[arg(long)]
+        data: Option<PathBuf>,
         /// Offer Ctrl-S saves to this project's `.volvelle/library`.
         #[arg(long)]
         project: Option<PathBuf>,
@@ -56,8 +59,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Show {
             spec,
             view,
+            data,
             project,
-        } => show(spec, view, viewer(project)),
+        } => show(spec, view, data, viewer(project)),
         Cmd::Schema => {
             println!(
                 "{}",
@@ -92,8 +96,14 @@ fn view(socket: PathBuf, mut app: App) -> anyhow::Result<()> {
             while let Ok(msg) = rx.try_recv() {
                 dirty = true;
                 match msg {
-                    Msg::Request(Request::Render { view, spec }) => app.render(view, spec),
-                    Msg::Request(Request::Close) => app.quit = true,
+                    Msg::Request(req) => match *req {
+                        Request::Render { view, spec, data } => app.render_with(view, spec, data),
+                        Request::Update { view, patch } => {
+                            let kept = app.update(&view, &patch);
+                            out.borrow_mut().send(Event::Updated { view, kept });
+                        }
+                        Request::Close => app.quit = true,
+                    },
                     Msg::Connected(id, stream) => out.borrow_mut().connect(id, stream),
                     Msg::Disconnected(id) => out.borrow_mut().disconnect(id),
                 }
@@ -113,12 +123,16 @@ fn view(socket: PathBuf, mut app: App) -> anyhow::Result<()> {
     result
 }
 
-fn show(path: PathBuf, view: String, mut app: App) -> anyhow::Result<()> {
-    let raw =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let spec =
-        volvelle_schema::parse_spec(serde_json::from_str(&raw)?).map_err(anyhow::Error::msg)?;
-    app.render(view, spec);
+fn show(path: PathBuf, view: String, data: Option<PathBuf>, mut app: App) -> anyhow::Result<()> {
+    let read = |path: &PathBuf| -> anyhow::Result<serde_json::Value> {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(serde_json::from_str(&raw)?)
+    };
+    let spec = volvelle_schema::parse_spec(read(&path)?).map_err(anyhow::Error::msg)?;
+    let data = data.as_ref().map(read).transpose()?;
+    volvelle_schema::bind(&spec, data.as_ref()).map_err(anyhow::Error::msg)?;
+    app.render_with(view, spec, data);
     let mut answer = None;
     let mut terminal = ratatui::init();
     let result = run(

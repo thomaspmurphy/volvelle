@@ -820,7 +820,18 @@ pub enum Request {
     /// Show a spec as the named view. Re-rendering the same view keeps what
     /// the user has typed or chosen in fields whose ids survive, so nothing
     /// moves under them. A different view name starts from the spec's values.
-    Render { view: String, spec: Node },
+    /// `data` fills the spec's binds; a bound field the user has not edited
+    /// takes its value from it.
+    Render {
+        view: String,
+        spec: Node,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<Value>,
+    },
+    /// Apply a patch to the view's data and redraw what is bound to it,
+    /// keeping focus, scroll and any bound field the user has edited. The
+    /// viewer acknowledges with [`Event::Updated`].
+    Update { view: String, patch: Vec<Op> },
     /// Quit the viewer.
     Close,
 }
@@ -863,8 +874,25 @@ pub enum Event {
         scope: library::Scope,
         path: String,
     },
+    /// The viewer applied an update. `kept` lists the pointers of bound
+    /// fields the update touched but the user had edited, so their values
+    /// stayed. Not an answer.
+    Updated { view: String, kept: Vec<String> },
     /// The viewer is shutting down.
     Closed,
+}
+
+impl Event {
+    /// The field values an answer carries.
+    pub fn values(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Event::Submit { values, .. }
+            | Event::Select { values, .. }
+            | Event::Answer { values, .. }
+            | Event::Cancel { values, .. } => Some(values),
+            Event::Saved { .. } | Event::Updated { .. } | Event::Closed => None,
+        }
+    }
 }
 
 #[cfg(test)]

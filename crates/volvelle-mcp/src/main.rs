@@ -177,6 +177,7 @@ impl Server {
             .send(&Request::Render {
                 view: view.clone(),
                 spec: spec.clone(),
+                data: None,
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
