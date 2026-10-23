@@ -91,7 +91,7 @@ saved views gain slots and become patterns.
   library before composing; each entry records `by`, and an agent never
   overwrites the user's.
 
-### 5. Data binding (done except save games)
+### 5. Data binding (done)
 
 Specs point at data instead of embedding it, so a saved view becomes a
 template and an update is a small data change, not a whole new spec. This
@@ -111,9 +111,8 @@ pulls paradigm 3 forward from phase 3, without the multi-agent server.
   the same pointer, so `wait_event` returns the answer and the state as one
   document. Multi selects do not bind, and Ctrl-S saves the template without
   its data.
-- Open (ABS-20): the data document can be saved and loaded alongside views,
-  which gives long-running sessions such as a tabletop RPG a save game: the
-  views are the sheet, map and inventory, the data is the game state.
+- Not planned: saving data documents. The agent gets the whole document back
+  from `wait_event` and persists it however suits the application.
 
 ### 6. Diagrams
 
