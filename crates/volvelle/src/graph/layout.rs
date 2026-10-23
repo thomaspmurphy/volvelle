@@ -59,7 +59,7 @@ impl Picture {
 
 /// What occupies a slot in a layer.
 enum Kind {
-    Node(usize),
+    Node,
     /// A point on an edge that spans layers. Dummies of reversed edges keep
     /// to the side of their layer.
     Dummy {
@@ -82,12 +82,6 @@ struct Item {
     mid: usize,
     /// Position of the footprint along the order axis.
     pos: usize,
-}
-
-impl Item {
-    fn center(&self) -> usize {
-        self.pos + self.mid
-    }
 }
 
 /// One step of an edge, between an item in one layer and an item in the
@@ -156,7 +150,7 @@ pub fn layout(g: &GraphNode) -> Picture {
     let flow = g.direction;
     let mut items: Vec<Item> = (0..n)
         .map(|i| Item {
-            kind: Kind::Node(i),
+            kind: Kind::Node,
             layer: layer[i],
             size_o: 0,
             size_r: 0,
@@ -272,16 +266,16 @@ pub fn layout(g: &GraphNode) -> Picture {
     for s in &segments {
         let (up, low) = (&items[s.upper], &items[s.lower]);
         let route = &routes[s.edge];
-        let arrow_up = route.back && matches!(up.kind, Kind::Node(_));
-        let arrow_down = !route.back && matches!(low.kind, Kind::Node(_));
+        let arrow_up = route.back && matches!(up.kind, Kind::Node);
+        let arrow_down = !route.back && matches!(low.kind, Kind::Node);
         let gap = &gaps[up.layer];
         let g0 = start[up.layer] + thick(up.layer);
         let from = match up.kind {
-            Kind::Node(_) => start[up.layer] + up.box_r - 1 + usize::from(arrow_up),
+            Kind::Node => start[up.layer] + up.box_r - 1 + usize::from(arrow_up),
             Kind::Dummy { .. } => start[up.layer],
         };
         let to = match low.kind {
-            Kind::Node(_) => start[low.layer] - usize::from(arrow_down),
+            Kind::Node => start[low.layer] - usize::from(arrow_down),
             Kind::Dummy { .. } => start[low.layer],
         };
         let t = g0 + gap.top + s.track;
@@ -634,7 +628,7 @@ fn ports(items: &[Item], layers: &[Vec<usize>], segments: &mut [Segment]) {
         let k = on.len();
         for (i, &j) in on.iter().enumerate() {
             let p = match it.kind {
-                Kind::Node(_) => 1 + (2 * i + 1) * (it.box_o - 2) / (2 * k),
+                Kind::Node => 1 + (2 * i + 1) * (it.box_o - 2) / (2 * k),
                 Kind::Dummy { .. } => it.mid,
             };
             if before {
@@ -729,10 +723,10 @@ fn tracks(
             }
         }
         let up_arrow = bent.iter().any(|&k| {
-            routes[segments[k].edge].back && matches!(items[segments[k].upper].kind, Kind::Node(_))
+            routes[segments[k].edge].back && matches!(items[segments[k].upper].kind, Kind::Node)
         });
         let down_arrow = bent.iter().any(|&k| {
-            !routes[segments[k].edge].back && matches!(items[segments[k].lower].kind, Kind::Node(_))
+            !routes[segments[k].edge].back && matches!(items[segments[k].lower].kind, Kind::Node)
         });
         let top = usize::from(up_arrow);
         let rows = if count == 0 {

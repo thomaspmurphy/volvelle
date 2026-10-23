@@ -8,6 +8,7 @@ use serde_json::{Map, Value, json};
 use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
 use volvelle_schema::{Event, Item, Node, Op, Pattern};
 
+use crate::graph::GraphState;
 use crate::tree::TreeState;
 
 /// How long the status line stays emphasised after a key on a locked view.
@@ -52,6 +53,7 @@ pub enum Field {
         require: Option<String>,
     },
     Tree(TreeState),
+    Graph(GraphState),
 }
 
 #[derive(Default)]
@@ -430,6 +432,16 @@ impl App {
                     }));
                 }
             }
+            Field::Graph(graph) => {
+                if let Some(value) = graph.key(key.code) {
+                    return Some(self.answer(|view, values| Event::Select {
+                        view,
+                        id,
+                        value,
+                        values,
+                    }));
+                }
+            }
             Field::Button => match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     return Some(self.answer(|view, values| Event::Submit {
@@ -716,6 +728,7 @@ fn init(node: &Node) -> Field {
         }
         Node::Toggle(n) => Field::Toggle(n.value()),
         Node::Tree(n) => Field::Tree(TreeState::new(n)),
+        Node::Graph(n) => Field::Graph(GraphState::new(n)),
         Node::List(n) => Field::List {
             cursor: 0,
             values: n
@@ -747,7 +760,8 @@ fn value_of(field: &Field) -> Option<Value> {
         | Field::Button
         | Field::Chooser { .. }
         | Field::Confirm { .. }
-        | Field::Tree(_) => return None,
+        | Field::Tree(_)
+        | Field::Graph(_) => return None,
     })
 }
 
@@ -779,7 +793,8 @@ fn refresh(prev: Field, fresh: Field) -> Field {
                 multiline,
             }
         }
-        (prev @ Field::List { .. }, fresh @ Field::List { .. }) => carry(prev, fresh),
+        (prev @ Field::List { .. }, fresh @ Field::List { .. })
+        | (prev @ Field::Graph(_), fresh @ Field::Graph(_)) => carry(prev, fresh),
         (_, fresh) => fresh,
     }
 }
@@ -847,6 +862,7 @@ fn carry(prev: Field, fresh: Field) -> Field {
             values,
         },
         (Field::Tree(prev), Field::Tree(fresh)) => Field::Tree(fresh.carry(prev)),
+        (Field::Graph(prev), Field::Graph(fresh)) => Field::Graph(fresh.carry(prev)),
         (_, fresh) => fresh,
     }
 }

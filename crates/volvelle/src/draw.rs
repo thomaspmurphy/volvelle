@@ -19,6 +19,7 @@ use volvelle_schema::{
 };
 
 use crate::app::{self, App, Field, Notice, Prompt};
+use crate::graph::{self, layout};
 use crate::markdown;
 use crate::tree;
 
@@ -36,7 +37,7 @@ pub mod palette {
     }
 }
 
-fn tone(t: Tone) -> Style {
+pub fn tone(t: Tone) -> Style {
     let color = match t {
         Tone::Normal => return Style::new(),
         Tone::Muted => Color::DarkGray,
@@ -123,6 +124,11 @@ fn draw_body(frame: &mut Frame, app: &mut App, body: Rect, status: Rect) {
             Some(Field::Text { top, .. }) => *top = t,
             Some(Field::Chooser { scroll, .. }) => *scroll = t,
             _ => {}
+        }
+    }
+    for (id, p) in canvas.pans {
+        if let Some(Field::Graph(g)) = app.fields.get_mut(&id) {
+            g.pan = p;
         }
     }
 
@@ -234,6 +240,8 @@ fn status_line(app: &App) -> Line<'static> {
             format!(" ↑↓ move · {toggle}J/K scroll preview · enter choose · esc cancel"),
             palette::muted(),
         ))
+    } else if matches!(app.focused_field(), Some(Field::Graph(_))) {
+        Line::from(hint(" ←↑↓→ move · enter choose · tab next · esc cancel"))
     } else if matches!(app.focused_field(), Some(Field::Tree(_))) {
         Line::from(hint(
             " ↑↓ move · ←→ fold · enter choose · tab next · esc cancel",
@@ -319,8 +327,9 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
         Node::Input(_) => 3,
         Node::Select(s) => s.options.len() as u16 + 2,
         Node::Toggle(_) | Node::Button(_) | Node::Progress(_) | Node::Divider(_) => 1,
-        // Drawn once the viewer lays graphs out.
-        Node::Graph(_) => 0,
+        Node::Graph(g) => {
+            layout::layout(g).height.max(1) as u16 + if g.title.is_some() { 2 } else { 0 }
+        }
         Node::Pattern(Pattern::ConfirmDestructive(c)) => {
             confirm_rows(c, width).iter().sum::<u16>() + 2
         }
@@ -386,6 +395,7 @@ fn flexible(n: &Node) -> bool {
         Node::List(l) => l.id.is_some(),
         Node::Select(_) => true,
         Node::Tree(t) => t.id.is_some(),
+        Node::Graph(g) => g.id.is_some(),
         Node::Box(b) => b.children.iter().any(flexible),
         _ => false,
     }
@@ -449,6 +459,8 @@ struct Canvas {
     cursor: Option<Position>,
     /// First visible line of each text field, written back to the app.
     tops: Vec<(String, usize)>,
+    /// Pan of each selectable graph, written back to the app.
+    pans: Vec<(String, (u16, u16))>,
 }
 
 impl Canvas {
@@ -459,6 +471,7 @@ impl Canvas {
             focus: None,
             cursor: None,
             tops: Vec::new(),
+            pans: Vec::new(),
         }
     }
 
@@ -684,8 +697,47 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         }
         Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
         Node::Pattern(Pattern::ChooseWithPreview(c)) => chooser(f, area, c, app),
-        Node::Graph(_) => {}
+        Node::Graph(g) => graph_view(f, area, g, app),
     }
+}
+
+/// A graph at its natural size, clipped to its area. A selectable graph
+/// pans to keep the node under its focus marker in sight.
+fn graph_view(f: &mut Canvas, area: Rect, g: &volvelle_schema::GraphNode, app: &App) {
+    let focused = g.id.as_deref().is_some_and(|id| app.is_focused(id));
+    let block = g
+        .title
+        .is_some()
+        .then(|| frame_block(g.title.as_deref(), focused));
+    let inner = block.as_ref().map_or(area, |b| b.inner(area));
+    if let Some(b) = block {
+        f.render_widget(b, area);
+    }
+    let p = layout::layout(g);
+    let mut pan = (0, 0);
+    if let (Some(id), Some(Field::Graph(state))) =
+        (&g.id, g.id.as_ref().and_then(|id| app.fields.get(id)))
+    {
+        pan = state.pan;
+        if let Some(b) = graph::focus(g, &p, app) {
+            let x = follow(
+                pan.0 as usize,
+                Some((b.x, b.width)),
+                inner.width as usize,
+                p.width,
+            );
+            let y = follow(
+                pan.1 as usize,
+                Some((b.y, b.height)),
+                inner.height as usize,
+                p.height,
+            );
+            pan = (x as u16, y as u16);
+        }
+        f.pans.push((id.clone(), pan));
+    }
+    let lines = graph::lines(g, &p, app);
+    f.render_widget(Paragraph::new(lines).scroll((pan.1, pan.0)), inner);
 }
 
 /// The list takes a third of the width, the preview the rest.
