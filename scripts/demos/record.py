@@ -215,7 +215,7 @@ class Demo:
                 "padding": "12px", "background": THEME["background"]}},
             "watermark": {"imagePath": None},
             "cursorStyle": "block",
-            "fontFamily": "Menlo, Monaco, monospace",
+            "fontFamily": "JetBrains Mono, Menlo, monospace",
             "fontSize": 13,
             "lineHeight": 1,
             "letterSpacing": 0,

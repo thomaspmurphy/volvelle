@@ -22,7 +22,7 @@ config:
   watermark:
     imagePath: null
   cursorStyle: "block"
-  fontFamily: "Menlo, Monaco, monospace"
+  fontFamily: "JetBrains Mono, Menlo, monospace"
   fontSize: 13
   lineHeight: 1
   letterSpacing: 0
