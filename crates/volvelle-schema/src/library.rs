@@ -1,5 +1,6 @@
 //! Saved views. The human keeps a view that proved useful by saving its spec
-//! under a name, and the agent brings it back later. There are two
+//! under a name, and the agent brings it back later. The agent may save
+//! views too, but never over the human's. There are two
 //! libraries: one per project in `<project>/.volvelle/library`, which can be
 //! committed, and one per user. A project entry shadows a user entry with
 //! the same name.
@@ -193,7 +194,7 @@ impl Library {
             .map(|l| format!("{:?}", l.name))
             .collect();
         let allowed = if names.is_empty() {
-            "nothing saved yet; the user saves a view with Ctrl-S".to_string()
+            "nothing saved yet; the user saves with Ctrl-S, the agent with `save`".to_string()
         } else {
             names.join(", ")
         };

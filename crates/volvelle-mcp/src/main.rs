@@ -28,8 +28,10 @@ a typed function call: `render` returns the shape the answer will take, and `wai
 returns exactly that shape. Protocol per view: render, then any number of re-renders (each \
 keeps what the user has entered), then one wait_event that returns the answer. A view with no \
 fields or buttons is display-only and cannot be waited on. Prefer a pattern when one fits: \
-it carries safe defaults and its own protocol. The user can save any view with Ctrl-S; \
-`library` lists saved views, and `render` with `saved` brings one back.";
+it carries safe defaults and its own protocol. Saved views: call `library` before composing a \
+view that may already exist, and render by name when one fits. `save` views likely to recur \
+(dashboards, forms, sheets, menus the session will come back to), not one-off questions. A \
+saved view is static: to adapt one, fetch it with `library {name}` and send a spec.";
 
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
@@ -38,7 +40,7 @@ a new `view` name replaces the old one. Atoms: box (row/column, optional border/
 fold, selectable with an id; a node's value defaults to its label path joined with /), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
 unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
-`saved`, the name of a view the user saved (see `library`). Returns the JSON Schema of the \
+`saved`, a name from `library`; prefer `saved` when one fits, as it sends no spec. Returns the JSON Schema of the \
 eventual answer.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
@@ -52,10 +54,10 @@ says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
 
-const LIBRARY_DESC: &str = "List the views the user saved with Ctrl-S: name, scope (project \
-or user; project entries shadow user ones), a one-line summary, when and from which view. With \
-`name`, return that entry in full, including its `spec`, to adapt it or to render it with \
-`saved`.";
+const LIBRARY_DESC: &str = "List saved views; call it before composing a view that may already \
+exist. Each has a name, scope (project or user; project shadows user), one-line summary, when, \
+from which view, and `by` (user, via Ctrl-S, or agent, via `save`). With `name`, return that \
+entry in full, `spec` included, to adapt it; to reuse it as is, render with `saved`.";
 
 const SAVE_DESC: &str = "Save a view to reuse it later with `render {view, saved}`, which \
 costs far fewer tokens than sending the spec again. Pass exactly one of `view`, a view \
@@ -258,7 +260,7 @@ impl Server {
             if views.is_empty() {
                 return Ok(json!({
                     "views": [],
-                    "hint": "nothing saved yet; the user saves a view with Ctrl-S"
+                    "hint": "nothing saved yet; the user saves with Ctrl-S, you with `save`"
                 }));
             }
             return Ok(json!({"views": views}));
