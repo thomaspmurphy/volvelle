@@ -14,6 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub mod library;
 mod tree;
 pub use tree::{Flat, TreeItem, TreeNode};
 
@@ -772,6 +773,14 @@ pub enum Event {
     Cancel {
         view: String,
         values: Map<String, Value>,
+    },
+    /// The user saved the view with Ctrl-S. Not an answer: it never ends a
+    /// wait.
+    Saved {
+        view: String,
+        name: String,
+        scope: library::Scope,
+        path: String,
     },
     /// The viewer is shutting down.
     Closed,

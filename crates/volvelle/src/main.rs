@@ -13,6 +13,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event as TermEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
+use volvelle_schema::library::Library;
 use volvelle_schema::{Event, Request};
 
 use app::App;
@@ -32,12 +33,18 @@ enum Cmd {
     View {
         #[arg(long)]
         socket: PathBuf,
+        /// Offer Ctrl-S saves to this project's `.volvelle/library`.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// Render one spec file, print the user's answer as JSON, and exit.
     Show {
         spec: PathBuf,
         #[arg(long, default_value = "main")]
         view: String,
+        /// Offer Ctrl-S saves to this project's `.volvelle/library`.
+        #[arg(long)]
+        project: Option<PathBuf>,
     },
     /// Print the component catalog's JSON Schema.
     Schema,
@@ -45,8 +52,12 @@ enum Cmd {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Cmd::View { socket } => view(socket),
-        Cmd::Show { spec, view } => show(spec, view),
+        Cmd::View { socket, project } => view(socket, viewer(project)),
+        Cmd::Show {
+            spec,
+            view,
+            project,
+        } => show(spec, view, viewer(project)),
         Cmd::Schema => {
             println!(
                 "{}",
@@ -57,13 +68,21 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn view(socket: PathBuf) -> anyhow::Result<()> {
+/// An empty viewer with its libraries.
+fn viewer(project: Option<PathBuf>) -> App {
+    App {
+        library: Library::from_env(project.as_deref()),
+        pane: std::env::var("HERDR_PANE_ID").ok(),
+        ..App::default()
+    }
+}
+
+fn view(socket: PathBuf, mut app: App) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     link::listen(&socket, tx).with_context(|| format!("binding {}", socket.display()))?;
     // Both callbacks deliver through the outbox.
     let out = RefCell::new(Outbox::default());
     let mut herdr = Herdr::from_env();
-    let mut app = App::default();
     let mut terminal = ratatui::init();
     let result = run(
         &mut terminal,
@@ -94,12 +113,11 @@ fn view(socket: PathBuf) -> anyhow::Result<()> {
     result
 }
 
-fn show(path: PathBuf, view: String) -> anyhow::Result<()> {
+fn show(path: PathBuf, view: String, mut app: App) -> anyhow::Result<()> {
     let raw =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let spec =
         volvelle_schema::parse_spec(serde_json::from_str(&raw)?).map_err(anyhow::Error::msg)?;
-    let mut app = App::default();
     app.render(view, spec);
     let mut answer = None;
     let mut terminal = ratatui::init();
@@ -108,6 +126,9 @@ fn show(path: PathBuf, view: String) -> anyhow::Result<()> {
         &mut app,
         |_| false,
         |ev| {
+            if matches!(ev, Event::Saved { .. }) {
+                return false;
+            }
             answer = Some(ev);
             true
         },

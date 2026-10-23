@@ -28,11 +28,11 @@ Phase 1 of the architecture: one agent, one view.
 - `volvelle-schema`: the atom catalog and patterns as serde types, JSON
   Schema via schemars, validation rules with path-level errors, and the
   result schema each spec answers with.
-- `volvelle`: the viewer. `volvelle view --socket PATH` serves specs over a
-  Unix socket; `volvelle show spec.json` renders one file and prints the
-  answer; `volvelle schema` prints the catalog schema.
-- `volvelle-mcp`: stdio MCP server with `render`, `wait_event` and `close`.
-  It splits a herdr pane for the viewer on first render.
+- `volvelle`: the viewer. `volvelle view --socket PATH [--project DIR]`
+  serves specs over a Unix socket; `volvelle show spec.json` renders one
+  file and prints the answer; `volvelle schema` prints the catalog schema.
+- `volvelle-mcp`: stdio MCP server with `render`, `wait_event`, `close`,
+  `library` and `save`. It splits a herdr pane for the viewer on first render.
 
 Not yet built: replay from the event log, the shared-state server,
 leases and CRDT regions (phases 2 to 4). See `docs/ROADMAP.md`, and
@@ -139,6 +139,69 @@ the node's value; without one it is display-only. With `leaves_only: true`
 only nodes without children answer, and Enter on a node with children folds
 or unfolds it. See `examples/tree.json`.
 
+## Saved views
+
+The human decides first which views are worth keeping. Ctrl-S on any view,
+answered or not, opens a prompt in the status line:
+
+```text
+ save as: sheet  [project|user] · tab scope · enter save · esc cancel
+```
+
+Tab switches the library, Enter saves, Esc closes the prompt, and keys typed
+there never reach the view. Names are lowercase letters, digits and hyphens
+(`[a-z0-9][a-z0-9-]{0,63}`). Saving over an existing name asks
+`overwrite "sheet"? y/n` first. What is saved is the spec as the agent
+rendered it, not what the user typed into its fields.
+
+There are two libraries, one JSON file per view:
+
+- Project: `.volvelle/library/<name>.json` in the directory `volvelle-mcp`
+  runs in, which Claude Code sets to the project. It can be committed.
+  The viewer offers it only when started with `--project`, which
+  `volvelle-mcp` passes.
+- User: `$VOLVELLE_USER_LIBRARY`, else `$XDG_DATA_HOME/volvelle/library`,
+  else `~/.local/share/volvelle/library`.
+
+A project entry shadows a user entry with the same name. Each file holds
+`name`, `spec`, `saved_at_ms`, `origin` (`view`, the viewer's herdr `pane`,
+and `by`, `user` or `agent`) and a one-line `summary`, such as
+`Character sheet · 3 inputs, 2 buttons, 1 tree`.
+
+The agent sees saved views through the `library` tool: with no arguments it
+lists `name`, `scope`, `summary`, `saved_at_ms`, `origin_view` and `by`; with
+`name` it returns the whole entry, `spec` included, to adapt. `render` takes
+exactly one of `spec` or `saved`:
+
+```json
+{"view": "sheet", "saved": "sheet"}
+```
+
+A saved spec is validated like any other, so one whose pattern version no
+longer exists is refused with the usual violation and
+`(from saved view "sheet")`.
+
+The agent can save too, since rendering by name costs far fewer tokens than
+sending a spec again. The server's instructions tell it to call `library`
+before composing a view that may exist, and to `save` views likely to recur,
+such as dashboards, forms and menus, but not one-off questions. `save` takes
+a `name`, exactly one of `view` (the spec last rendered under that id in the
+session) or `spec`, an optional `scope` (`project` by default), `summary`
+(generated when omitted) and `overwrite`:
+
+```json
+{"name": "ci-board", "view": "ci", "scope": "project"}
+```
+
+The human's saves stay theirs. An agent can never replace an entry with
+`by: "user"`; it is refused with a free name to use instead. Replacing the
+agent's own entry needs `overwrite: true`. Entries saved before `by` existed
+read as the user's.
+
+The session log records each save, the user's and the agent's, as a `saved`
+record with `by`, and each render from the library with `"saved": "<name>"`,
+so reuse shows up there.
+
 ## Keys
 
 Tab and Shift-Tab move focus. Space toggles. Enter confirms or presses, and
@@ -146,7 +209,8 @@ inserts a newline in a multi-line input. In a tree, Up and Down (or j and k)
 move, Right (l) unfolds or steps into a node, Left (h) folds or steps out to
 the parent, and Space toggles a fold. PageUp and PageDown scroll a view
 taller than the pane; J and K (or Shift-Up and Shift-Down) scroll a long
-preview. Esc cancels. Ctrl-C closes the viewer.
+preview. Esc cancels. Ctrl-S saves the view to a library. Ctrl-C closes the
+viewer.
 
 ## Environment
 
@@ -155,4 +219,5 @@ preview. Esc cancels. Ctrl-C closes the viewer.
 | `VOLVELLE_SOCKET` | Socket path. Defaults to one per herdr pane in `$TMPDIR`. |
 | `VOLVELLE_BIN` | Viewer binary to launch. |
 | `VOLVELLE_FOCUS=1` | Focus the viewer pane when it opens. Off by default. |
+| `VOLVELLE_USER_LIBRARY` | Directory of the user's saved views. Defaults to `$XDG_DATA_HOME/volvelle/library`, else `~/.local/share/volvelle/library`. |
 | `VOLVELLE_LOG_DIR` | Directory for session logs (JSONL, one file per server process). Defaults to `$XDG_STATE_HOME/volvelle/sessions`, else `~/.local/state/volvelle/sessions`. |
