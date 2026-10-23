@@ -774,6 +774,14 @@ pub enum Event {
         view: String,
         values: Map<String, Value>,
     },
+    /// The user saved the view with Ctrl-S. Not an answer: it never ends a
+    /// wait.
+    Saved {
+        view: String,
+        name: String,
+        scope: library::Scope,
+        path: String,
+    },
     /// The viewer is shutting down.
     Closed,
 }

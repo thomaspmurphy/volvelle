@@ -135,6 +135,8 @@ impl Monitor {
                 self.closed();
                 return None;
             }
+            // Saving is the human keeping a view, not answering it.
+            Event::Saved { .. } => return None,
         };
         if answered != view || self.views.get(view) != Some(&State::Awaiting) {
             return None;
@@ -167,6 +169,7 @@ fn owed_refusal(view: &str) -> Refusal {
 mod tests {
     use super::*;
     use serde_json::{Map, json};
+    use volvelle_schema::library::Scope;
     use volvelle_schema::{CHOOSE_WITH_PREVIEW, CONFIRM_DESTRUCTIVE};
 
     fn submit(view: &str) -> Event {
@@ -191,6 +194,26 @@ mod tests {
         assert!(msg.ends_with("allowed next: render"));
         m.rendered("a", true, None);
         assert!(m.check_wait("a").is_ok());
+    }
+
+    #[test]
+    fn saving_neither_answers_nor_disturbs_a_wait() {
+        let mut m = Monitor::default();
+        m.rendered("a", true, None);
+        let saved = Event::Saved {
+            view: "a".into(),
+            name: "sheet".into(),
+            scope: Scope::User,
+            path: "/lib/sheet.json".into(),
+        };
+        assert!(m.accept("a", &saved).is_none());
+        assert!(m.check_wait("a").is_ok());
+        assert!(m.accept("a", &submit("a")).is_some());
+        assert!(m.accept("a", &saved).is_none());
+        let Err(Refusal(msg)) = m.check_wait("a") else {
+            panic!()
+        };
+        assert!(msg.contains("already answered"));
     }
 
     #[test]
