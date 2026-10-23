@@ -8,6 +8,12 @@ A volvelle is a paper wheel of rotating discs, used from Llull to Kircher to
 generate new combinations from fixed tables. Volvelle does the same with
 interfaces.
 
+![An RPG played with an agent through volvelle](docs/images/rpg.png)
+
+*A tabletop RPG run by Claude Code. The run log is on the left; on the right,
+volvelle shows the scene with signal and badge gauges, the last roll, and a
+selectable list of actions whose answer goes back to the agent.*
+
 ## Status
 
 Phase 1 of the architecture: one agent, one view.
