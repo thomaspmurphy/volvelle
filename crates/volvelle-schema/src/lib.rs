@@ -16,8 +16,10 @@ use serde_json::{Map, Value, json};
 
 mod bind;
 pub mod library;
+mod patch;
 mod tree;
 pub use bind::{bind, check_binds, resolve, write_back};
+pub use patch::{Op, apply_patch, touches};
 pub use tree::{Flat, TreeItem, TreeNode};
 
 /// One component in the UI tree.
