@@ -1,5 +1,6 @@
 mod app;
 mod draw;
+mod graph;
 mod link;
 mod markdown;
 mod tree;

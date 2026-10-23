@@ -1,0 +1,34 @@
+{
+  "type": "box",
+  "title": "Dependencies",
+  "children": [
+    {"type": "text", "text": "Which crate should I read first?", "tone": "accent"},
+    {"type": "graph", "id": "crate", "nodes": [
+      {"id": "volvelle-mcp"},
+      {"id": "volvelle"},
+      {"id": "volvelle-schema", "tone": "accent"},
+      {"id": "ratatui"},
+      {"id": "clap"},
+      {"id": "anyhow"},
+      {"id": "crossterm"},
+      {"id": "schemars"},
+      {"id": "serde_json"},
+      {"id": "serde"}
+    ], "edges": [
+      {"from": "volvelle-mcp", "to": "volvelle-schema"},
+      {"from": "volvelle-mcp", "to": "anyhow"},
+      {"from": "volvelle-mcp", "to": "serde_json"},
+      {"from": "volvelle", "to": "volvelle-schema"},
+      {"from": "volvelle", "to": "ratatui"},
+      {"from": "volvelle", "to": "crossterm"},
+      {"from": "volvelle", "to": "clap"},
+      {"from": "volvelle", "to": "anyhow"},
+      {"from": "ratatui", "to": "crossterm"},
+      {"from": "volvelle-schema", "to": "schemars"},
+      {"from": "volvelle-schema", "to": "serde_json"},
+      {"from": "volvelle-schema", "to": "serde"},
+      {"from": "schemars", "to": "serde_json"},
+      {"from": "serde_json", "to": "serde"}
+    ]}
+  ]
+}

@@ -42,13 +42,16 @@ Re-rendering the same `view` updates it in place and keeps what the user has typ
 a new `view` name replaces the old one. Atoms: box (row/column, optional border/title), text \
 (tone, bold, align), markdown, table, list (selectable with an id), tree (nested nodes that \
 fold, selectable with an id; a node's value defaults to its label path joined with /; \
-leaves_only makes Enter on a branch fold it instead of answering), input, \
+leaves_only makes Enter on a branch fold it instead of answering), graph (nodes {id, label?, \
+tone?} and edges {from, to, label?}, direction down or right, a highlighted `current` node; the \
+viewer lays it out, so never place anything; at most 64 nodes and 256 edges; selectable with an \
+id, answering with the node id), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
 unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
 `saved`, a name from `library`; prefer `saved` when one fits, as it sends no spec. Returns the JSON Schema of the \
-eventual answer. Data binding: text, markdown, progress, list, table, input, toggle and \
-single select take `bind`, a JSON Pointer into `data`, in place of their literal (text, \
-value, items or rows). Every bind must resolve to the type its atom needs. Bound fields write \
+eventual answer. Data binding: text, markdown, progress, list, table, input, toggle, \
+single select and graph take `bind`, a JSON Pointer into `data`, in place of their literal \
+(text, value, items, rows or a graph's `current` node id). Every bind must resolve to the type its atom needs. Bound fields write \
 the user's input back into the answer's `data`; change the data later with `update`.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
@@ -57,7 +60,7 @@ the user's input back into the answer's `data`; change the data later with `upda
 {\"type\":\"button\",\"id\":\"abort\",\"label\":\"Cancel\"}]}}";
 
 const WAIT_DESC: &str = "Wait for the user to answer a view: a button press (submit), Enter on \
-a selectable list or tree (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
+a selectable list, tree or graph (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
 says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
 timeouts short (default 60000 ms, max 300000) and loop. One answer per render. A view \

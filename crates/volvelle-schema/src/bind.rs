@@ -19,6 +19,7 @@ fn literal(node: &Node) -> Option<(&'static str, &'static str, bool, bool)> {
         Node::Input(n) => ("input", "value", false, n.value.is_some()),
         Node::Toggle(n) => ("toggle", "value", false, n.value.is_some()),
         Node::Select(n) => ("select", "value", false, !n.value.is_empty()),
+        Node::Graph(n) => ("graph", "current", false, n.current.is_some()),
         _ => return None,
     })
 }
@@ -157,6 +158,11 @@ fn fits(node: &Node, value: &Value) -> Result<(), (String, Vec<String>)> {
         Node::List(_) if serde_json::from_value::<Vec<Item>>(value.clone()).is_err() => {
             need("an array of strings or of {label, value?, detail?} items")
         }
+        Node::Graph(g) => match value.as_str() {
+            Some(v) if g.nodes.iter().any(|n| n.id == v) => Ok(()),
+            Some(_) => Err(("which is not a node of the graph".into(), g.quoted_ids())),
+            None => Err(("but graph needs a node id".into(), g.quoted_ids())),
+        },
         Node::Table(_) if serde_json::from_value::<Vec<Vec<String>>>(value.clone()).is_err() => {
             need("an array of rows, each an array of strings")
         }
@@ -240,6 +246,7 @@ fn fill(node: &mut Node, data: &Value) {
         Node::Input(n) => n.value = at(&n.bind).and_then(string).or(n.value.take()),
         Node::Toggle(n) => n.value = at(&n.bind).and_then(|v| v.as_bool()).or(n.value),
         Node::Progress(n) => n.value = at(&n.bind).and_then(|v| v.as_f64()).or(n.value),
+        Node::Graph(n) => n.current = at(&n.bind).and_then(string).or(n.current.take()),
         Node::Select(n) => {
             if let Some(v) = at(&n.bind).and_then(string) {
                 n.value = vec![v];
@@ -423,6 +430,52 @@ mod tests {
                 "at /children/4: list has neither `items` nor `bind`; allowed: `items`, `bind` with a pointer into `data`",
             ]
         );
+    }
+
+    #[test]
+    fn graph_current_binds_to_a_node_id() {
+        let spec = |bind: &str| {
+            json!({"type": "graph", "id": "g", "nodes": [{"id": "idle"}, {"id": "busy"}],
+                   "edges": [{"from": "idle", "to": "busy"}], "bind": bind})
+        };
+        let data = json!({"state": "busy", "other": "gone", "n": 3});
+        let Node::Graph(g) = bind(&parse_spec(spec("/state")).unwrap(), Some(&data)).unwrap()
+        else {
+            panic!("expected a graph")
+        };
+        assert_eq!(g.current.as_deref(), Some("busy"));
+        let patched = crate::apply_patch(
+            &data,
+            &[
+                serde_json::from_value(json!({"op": "replace", "path": "/state", "value": "idle"}))
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let Node::Graph(g) = resolve(&parse_spec(spec("/state")).unwrap(), &patched) else {
+            panic!("expected a graph")
+        };
+        assert_eq!(g.current.as_deref(), Some("idle"));
+
+        assert_eq!(
+            errors(spec("/other"), Some(data.clone())),
+            [
+                "at /bind: bind \"/other\" holds \"gone\", which is not a node of the graph; allowed: \"idle\", \"busy\""
+            ]
+        );
+        assert_eq!(
+            errors(spec("/n"), Some(data)),
+            [
+                "at /bind: bind \"/n\" holds 3, but graph needs a node id; allowed: \"idle\", \"busy\""
+            ]
+        );
+        let mut both = spec("/state");
+        both["current"] = json!("idle");
+        assert_eq!(
+            parse_spec(both).unwrap_err(),
+            "at /: graph has both `current` and `bind`; allowed: `current`, `bind`"
+        );
+        parse_spec(json!({"type": "graph", "nodes": [{"id": "a"}]})).unwrap();
     }
 
     #[test]

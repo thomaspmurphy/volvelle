@@ -1,0 +1,22 @@
+{
+  "type": "box",
+  "title": "View lifecycle",
+  "children": [
+    {"type": "text", "text": "How volvelle-mcp sees one view, from render to close.", "tone": "muted"},
+    {"type": "graph", "nodes": [
+      {"id": "awaiting", "label": "Awaiting"},
+      {"id": "display", "label": "Display", "tone": "accent"},
+      {"id": "answered", "label": "Answered", "tone": "success"},
+      {"id": "replaced", "label": "Replaced", "tone": "warning"},
+      {"id": "closed", "label": "Closed", "tone": "muted"}
+    ], "edges": [
+      {"from": "awaiting", "to": "display", "label": "render"},
+      {"from": "display", "to": "display", "label": "re-render"},
+      {"from": "display", "to": "answered", "label": "answer"},
+      {"from": "display", "to": "replaced", "label": "new view"},
+      {"from": "answered", "to": "display", "label": "render"},
+      {"from": "answered", "to": "closed", "label": "close"},
+      {"from": "replaced", "to": "closed", "label": "close"}
+    ], "current": "display"}
+  ]
+}

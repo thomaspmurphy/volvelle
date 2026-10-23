@@ -377,6 +377,7 @@ fn kind(n: &Node) -> Option<&'static str> {
         Node::Table(_) => "table",
         Node::List(_) => "list",
         Node::Tree(_) => "tree",
+        Node::Graph(_) => "graph",
         Node::Input(_) => "input",
         Node::Select(_) => "select",
         Node::Toggle(_) => "toggle",
