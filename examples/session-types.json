@@ -2,7 +2,7 @@
   "type": "box",
   "title": "Session types",
   "children": [
-    {"type": "text", "text": "How volvelle-mcp's monitor sees one view, from render to close.", "tone": "muted"},
+    {"type": "text", "text": "How volvelle-mcp's monitor sees one view, from render to close. Render from any state starts a new view.", "tone": "muted"},
     {"type": "pattern", "name": "state-machine@1", "title": "View lifecycle",
      "states": [
       {"id": "awaiting", "label": "Awaiting"},
@@ -13,22 +13,16 @@
       {"id": "closed", "label": "Closed", "tone": "muted"}
     ], "start": "awaiting", "transitions": [
       {"from": "awaiting", "to": "awaiting", "label": "update"},
-      {"from": "awaiting", "to": "display", "label": "render"},
       {"from": "awaiting", "to": "answered", "label": "answer"},
       {"from": "awaiting", "to": "owes", "label": "confirm"},
-      {"from": "awaiting", "to": "replaced", "label": "new view"},
-      {"from": "awaiting", "to": "closed", "label": "close"},
-      {"from": "display", "to": "display", "label": "update"},
-      {"from": "display", "to": "awaiting", "label": "render"},
-      {"from": "display", "to": "replaced", "label": "new view"},
-      {"from": "display", "to": "closed", "label": "close"},
-      {"from": "answered", "to": "awaiting", "label": "render"},
-      {"from": "answered", "to": "replaced", "label": "new view"},
-      {"from": "answered", "to": "closed", "label": "close"},
-      {"from": "owes", "to": "awaiting", "label": "report"},
       {"from": "owes", "to": "display", "label": "report"},
-      {"from": "replaced", "to": "awaiting", "label": "render"},
-      {"from": "closed", "to": "awaiting", "label": "render"}
+      {"from": "display", "to": "display", "label": "update"},
+      {"from": "awaiting", "to": "replaced", "label": "new view"},
+      {"from": "display", "to": "replaced", "label": "new view"},
+      {"from": "answered", "to": "replaced", "label": "new view"},
+      {"from": "awaiting", "to": "closed", "label": "close"},
+      {"from": "display", "to": "closed", "label": "close"},
+      {"from": "answered", "to": "closed", "label": "close"}
     ], "current": "awaiting"},
     {"type": "pattern", "name": "state-machine@1", "title": "confirm-destructive@1",
      "direction": "right",
