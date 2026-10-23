@@ -344,6 +344,9 @@ fn height(n: &Node, width: u16, app: &App, cap: u16) -> u16 {
                 .unwrap_or(0);
             (c.items.len() as u16).max(tallest).max(1) + 2
         }
+        Node::Pattern(Pattern::StateMachine(s)) => {
+            return height(&Node::Graph(s.graph()), width, app, cap);
+        }
     };
     if capped(n) { h.min(cap) } else { h }
 }
@@ -396,6 +399,7 @@ fn flexible(n: &Node) -> bool {
         Node::Select(_) => true,
         Node::Tree(t) => t.id.is_some(),
         Node::Graph(g) => g.id.is_some(),
+        Node::Pattern(Pattern::StateMachine(s)) => s.id.is_some(),
         Node::Box(b) => b.children.iter().any(flexible),
         _ => false,
     }
@@ -697,6 +701,7 @@ fn node(f: &mut Canvas, area: Rect, n: &Node, app: &App) {
         }
         Node::Pattern(Pattern::ConfirmDestructive(c)) => confirm(f, area, c, app),
         Node::Pattern(Pattern::ChooseWithPreview(c)) => chooser(f, area, c, app),
+        Node::Pattern(Pattern::StateMachine(s)) => graph_view(f, area, &s.graph(), app),
         Node::Graph(g) => graph_view(f, area, g, app),
     }
 }

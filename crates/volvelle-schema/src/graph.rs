@@ -52,6 +52,10 @@ pub struct Vertex {
     /// Colours the node's border.
     #[serde(default)]
     pub tone: Tone,
+    /// Drawn but never focused, highlighted or answered, like a state
+    /// machine's entry point. Patterns set it; specs cannot.
+    #[serde(skip)]
+    pub inert: bool,
 }
 
 impl Vertex {
@@ -72,7 +76,11 @@ pub struct Edge {
 impl GraphNode {
     /// The node ids, in order, which are also what Enter can answer with.
     pub fn ids(&self) -> Vec<&str> {
-        self.nodes.iter().map(|n| n.id.as_str()).collect()
+        self.nodes
+            .iter()
+            .filter(|n| !n.inert)
+            .map(|n| n.id.as_str())
+            .collect()
     }
 
     /// The node ids quoted, as the alternatives a violation offers.

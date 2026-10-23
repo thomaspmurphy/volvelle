@@ -1,0 +1,40 @@
+{
+  "type": "box",
+  "title": "Session types",
+  "children": [
+    {"type": "text", "text": "How volvelle-mcp's monitor sees one view, from render to close. Render from any state starts a new view.", "tone": "muted"},
+    {"type": "pattern", "name": "state-machine@1", "title": "View lifecycle",
+     "states": [
+      {"id": "awaiting", "label": "Awaiting"},
+      {"id": "display", "label": "Display"},
+      {"id": "answered", "label": "Answered", "tone": "success"},
+      {"id": "owes", "label": "Owes", "tone": "warning"},
+      {"id": "replaced", "label": "Replaced", "tone": "muted"},
+      {"id": "closed", "label": "Closed", "tone": "muted"}
+    ], "start": "awaiting", "transitions": [
+      {"from": "awaiting", "to": "awaiting", "label": "update"},
+      {"from": "awaiting", "to": "answered", "label": "answer"},
+      {"from": "awaiting", "to": "owes", "label": "confirm"},
+      {"from": "owes", "to": "display", "label": "report"},
+      {"from": "display", "to": "display", "label": "update"},
+      {"from": "awaiting", "to": "replaced", "label": "new view"},
+      {"from": "display", "to": "replaced", "label": "new view"},
+      {"from": "answered", "to": "replaced", "label": "new view"},
+      {"from": "awaiting", "to": "closed", "label": "close"},
+      {"from": "display", "to": "closed", "label": "close"},
+      {"from": "answered", "to": "closed", "label": "close"}
+    ], "current": "awaiting"},
+    {"type": "pattern", "name": "state-machine@1", "title": "confirm-destructive@1",
+     "direction": "right",
+     "states": [
+      {"id": "awaiting", "label": "Awaiting"},
+      {"id": "owes", "label": "Owes", "tone": "warning"},
+      {"id": "answered", "label": "Answered", "tone": "success"},
+      {"id": "display", "label": "Display"}
+    ], "start": "awaiting", "end": ["answered", "display"], "transitions": [
+      {"from": "awaiting", "to": "owes", "label": "confirm"},
+      {"from": "awaiting", "to": "answered", "label": "cancel"},
+      {"from": "owes", "to": "display", "label": "report"}
+    ]}
+  ]
+}

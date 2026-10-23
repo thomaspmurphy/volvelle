@@ -644,11 +644,14 @@ fn has_answer(spec: &Node) -> bool {
     found
 }
 
-/// The spec's pattern; validation allows at most one per view.
+/// The pattern that holds the spec's session type; validation allows at
+/// most one per view.
 fn pattern_of(spec: &Node) -> Option<&'static PatternInfo> {
     let mut found = None;
     spec.walk(&mut |n| {
-        if let Node::Pattern(p) = n {
+        if let Node::Pattern(p) = n
+            && p.answers()
+        {
             found = Some(p.info());
         }
     });
@@ -736,8 +739,10 @@ fn tools() -> Value {
 fn render_description() -> String {
     let mut out = format!(
         "{RENDER_DESC}\n\nPatterns: write {{\"type\":\"pattern\",\"name\":<name>, ...slots}} \
-         wherever an atom fits, at most one per view. Slots are data, not atoms. The answer \
-         is {{\"type\":\"answer\",\"id\":<id>,\"value\":<returns>,\"values\":{{...}}}}."
+         wherever an atom fits, at most one per view besides any state machines. Slots are \
+         data, not atoms. The answer is \
+         {{\"type\":\"answer\",\"id\":<id>,\"value\":<returns>,\"values\":{{...}}}}, \
+         except where a pattern says otherwise."
     );
     for p in volvelle_schema::patterns() {
         out.push_str(&format!(
@@ -1437,13 +1442,39 @@ mod tests {
             "Slots: id, consequence, summary, cancel_label?, confirm_label?, require_typing?, title?."
         ));
         assert!(desc.contains("Slots: id, items, multi?, title?."));
+        assert!(desc.contains(
+            "Slots: start, states, bind?, current?, direction?, end?, id?, title?, transitions?."
+        ));
+    }
+
+    #[test]
+    fn state_machines_leave_the_session_type_to_another_pattern() {
+        let spec = volvelle_schema::parse_spec(json!({"type": "box", "children": [
+            {"type": "pattern", "name": "state-machine@1", "states": [{"id": "a"}], "start": "a"},
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+             "items": [{"label": "a", "preview": "a"}]}
+        ]}))
+        .unwrap();
+        assert_eq!(
+            pattern_of(&spec).map(|p| p.name),
+            Some("choose-with-preview@1")
+        );
+        let machine = volvelle_schema::parse_spec(json!({"type": "pattern",
+            "name": "state-machine@1", "id": "m", "states": [{"id": "a"}], "start": "a"}))
+        .unwrap();
+        assert!(pattern_of(&machine).is_none());
+        assert!(has_answer(&machine));
     }
 
     #[test]
     fn render_schema_accepts_patterns() {
         let schema = render_schema();
         let text = schema.to_string();
-        assert!(text.contains("confirm-destructive@1") && text.contains("choose-with-preview@1"));
+        assert!(
+            text.contains("confirm-destructive@1")
+                && text.contains("choose-with-preview@1")
+                && text.contains("state-machine@1")
+        );
         assert_eq!(schema["required"], json!(["view"]));
         assert_eq!(schema["properties"]["saved"]["type"], "string");
         let names: Vec<Value> = tools()

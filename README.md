@@ -79,7 +79,7 @@ exactly that shape:
  "values": {"env": "prod", "migrate": true, "note": "fix login"}}
 ```
 
-Other answers are `select` (Enter on a list, tree or graph with an id), `cancel` (Esc) and
+Other answers are `select` (Enter on a list, tree, graph or state machine with an id), `cancel` (Esc) and
 `answer` (a pattern's typed value, see below). A view with no fields or
 buttons is display-only and cannot be waited on.
 
@@ -178,7 +178,8 @@ volvelle show examples/bound-sheet.json --data examples/bound-sheet.data.json
 A pattern is a named, versioned composition with slots, a typed answer and
 its own session type. It goes wherever an atom does, written as
 `{"type": "pattern", "name": "<name>@<version>", ...slots}`. Slots are plain
-data, so patterns never nest, and a view holds at most one. Each pattern is
+data, so patterns never nest, and a view holds at most one, not counting
+state machines, which answer like the graph they draw. Each pattern is
 declared once in `volvelle-schema`; the `render` tool description and the
 session monitor are generated from that declaration.
 
@@ -186,6 +187,7 @@ session monitor are generated from that declaration.
 | --- | --- | --- |
 | `confirm-destructive@1` | `id`, `summary` (Markdown), `consequence`, `title?`, `confirm_label?`, `cancel_label?`, `require_typing?` | `{"confirmed": bool}` |
 | `choose-with-preview@1` | `id`, `items` (`label`, `preview` in Markdown, `value?`, `detail?`), `title?`, `multi?` | `{"selected": value}`, or an array with `multi` |
+| `state-machine@1` | `states` (`id`, `label?`, `tone?`), `start`, `end?`, `transitions` (`from`, `to`, `label?`), `current?` or `bind?`, `id?`, `title?`, `direction?` | none; with `id`, a `select` whose value is a state id |
 
 `confirm-destructive@1` enforces the safe defaults: focus starts on Cancel,
 Confirm is drawn in the error tone, and with `require_typing` it stays
@@ -193,6 +195,36 @@ disabled until the user types that text exactly. It must be the only
 interactive element in its view. `choose-with-preview@1` shows the preview of
 the item under the cursor without a round trip to the agent. See
 `examples/confirm.json` and `examples/choose.json`.
+
+`state-machine@1` draws a state diagram on the `graph` atom. The agent names
+the states, the `start` state, any `end` states and the labelled
+transitions, and the viewer lays them out: a small `●` entry point leads to
+`start`, end states carry a `◉` after their label, and `current` is lit in
+the accent colour. Transitions between the same two states share one edge,
+their labels joined with commas. Bind `current` instead and `update` moves the light, as
+with a graph:
+
+```json
+{"type": "pattern", "name": "state-machine@1", "title": "Deploy",
+ "states": [{"id": "build"}, {"id": "verify"}, {"id": "live", "tone": "success"},
+            {"id": "rolled-back", "tone": "error"}],
+ "start": "build", "end": ["live", "rolled-back"],
+ "transitions": [{"from": "build", "to": "verify", "label": "artifact"},
+                 {"from": "verify", "to": "live", "label": "green"},
+                 {"from": "verify", "to": "rolled-back", "label": "red"}],
+ "bind": "/state"}
+```
+
+There must be at least one state and at most 64, with unique ids, and at
+most 256 transitions. `start`, every `end`, both ends of every transition,
+`current` and the bound value must name a state. Every state must be
+reachable from `start`, since one that is not is almost always a slip in the
+spec, and end states have no outgoing transitions. Without an `id` the
+pattern is display-only. With one, arrows move a focus marker over the
+states and Enter answers `{"type": "select", "id": <id>, "value": <state
+id>}`; the entry point is never focused, lit or answered. It owes nothing
+after its answer. `examples/session-types.json` draws volvelle's own view
+lifecycle and the `confirm-destructive@1` protocol this way.
 
 A `tree` holds nested `nodes`, each with a `label`, optional `detail` and
 `children`, and `open: false` to start folded. A node's value defaults to its
