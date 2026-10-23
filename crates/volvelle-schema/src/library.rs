@@ -124,6 +124,8 @@ impl Library {
     }
 
     /// Writes an entry, replacing any with the same name in that scope.
+    /// Null fields are left out of the spec, so the file stays close to
+    /// what the agent sent.
     pub fn save(&self, scope: Scope, entry: &Entry) -> io::Result<PathBuf> {
         valid_name(&entry.name).map_err(io::Error::other)?;
         let Some(dir) = self.dir(scope) else {
@@ -132,7 +134,9 @@ impl Library {
         fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.json", entry.name));
         let tmp = dir.join(format!(".{}.json.tmp", entry.name));
-        let mut text = serde_json::to_string_pretty(entry).map_err(io::Error::other)?;
+        let mut entry = entry.clone();
+        strip_nulls(&mut entry.spec);
+        let mut text = serde_json::to_string_pretty(&entry).map_err(io::Error::other)?;
         text.push('\n');
         fs::write(&tmp, text)?;
         fs::rename(&tmp, &path)?;
@@ -203,6 +207,19 @@ impl Library {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+}
+
+/// Removes object fields whose value is null, at any depth. Nulls inside
+/// arrays stay, since removing them would shift positions.
+fn strip_nulls(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            map.values_mut().for_each(strip_nulls);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_nulls),
+        _ => {}
     }
 }
 
@@ -435,6 +452,40 @@ mod tests {
     }
 
     #[test]
+    fn saved_specs_leave_out_nulls_and_still_round_trip() {
+        let lib = Library {
+            project: None,
+            user: Some(temp("nulls")),
+        };
+        let spec = parse_spec(json!({"type": "box", "children": [
+            {"type": "input", "id": "name", "value": ""},
+            {"type": "table", "headers": ["a"], "rows": [["1"]]},
+            {"type": "progress", "value": 0.0}
+        ]}))
+        .unwrap();
+        let entry = Entry::new("form", &spec, Origin::default());
+        assert!(
+            entry.spec.to_string().contains("null"),
+            "serde writes nulls"
+        );
+        let path = lib.save(Scope::User, &entry).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("null"), "{text}");
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        let input = &raw["spec"]["children"][0];
+        assert_eq!(
+            (&input["value"], &input["secret"]),
+            (&json!(""), &json!(false))
+        );
+        assert!(input.get("label").is_none());
+        assert_eq!(raw["spec"]["children"][2]["value"], 0.0);
+        let (_, _, back) = lib.load("form").unwrap();
+        let reparsed = serde_json::to_value(parse_spec(back.spec).unwrap()).unwrap();
+        assert_eq!(reparsed, entry.spec);
+        fs::remove_dir_all(lib.user.unwrap()).unwrap();
+    }
+
+    #[test]
     fn save_and_load_round_trip() {
         let lib = Library {
             project: None,
@@ -451,10 +502,10 @@ mod tests {
         assert!(lib.save(Scope::Project, &entry).is_err(), "no project");
         let (scope, _, back) = lib.load("sheet").unwrap();
         assert_eq!(scope, Scope::User);
-        assert_eq!(back.spec, entry.spec);
         assert_eq!(back.origin.pane.as_deref(), Some("p1"));
         assert_eq!(back.saved_at_ms, entry.saved_at_ms);
-        parse_spec(back.spec).unwrap();
+        let reparsed = serde_json::to_value(parse_spec(back.spec).unwrap()).unwrap();
+        assert_eq!(reparsed, entry.spec);
         let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         for key in ["name", "spec", "saved_at_ms", "origin", "summary"] {
             assert!(raw.get(key).is_some(), "{key}");
