@@ -10,7 +10,7 @@ use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
-use volvelle_schema::library::Library;
+use volvelle_schema::library::{By, Library};
 use volvelle_schema::{Event, Node, PatternInfo, Request};
 
 use log::{Kind, Log};
@@ -277,6 +277,7 @@ impl Server {
                 ("name", name.as_str().into()),
                 ("scope", scope.as_str().into()),
                 ("path", path.as_str().into()),
+                ("by", By::User.as_str().into()),
             ];
             self.log.record(Kind::Saved, Some(view), &body);
         }
@@ -498,6 +499,7 @@ mod tests {
         let origin = Origin {
             view: "v0".into(),
             pane: None,
+            by: By::User,
         };
         lib.save(Scope::User, &Entry::new("sheet", &spec, origin.clone()))
             .unwrap();
@@ -601,8 +603,8 @@ mod tests {
         assert_eq!(kinds, ["start", "render", "saved", "answer"]);
         assert_eq!(records[1]["saved"], "sheet");
         assert_eq!(
-            (&records[2]["name"], &records[2]["view"]),
-            (&json!("sheet2"), &json!("v"))
+            (&records[2]["name"], &records[2]["view"], &records[2]["by"]),
+            (&json!("sheet2"), &json!("v"), &json!("user"))
         );
         fs::remove_dir_all(root).unwrap();
     }

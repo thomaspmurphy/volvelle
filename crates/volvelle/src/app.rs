@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Map, Value, json};
-use volvelle_schema::library::{self, Entry, Library, Origin, Scope};
+use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
 use volvelle_schema::{Event, Item, Node, Pattern};
 
 use crate::tree::TreeState;
@@ -527,6 +527,7 @@ impl App {
         let origin = Origin {
             view: p.view.clone(),
             pane: self.pane.clone(),
+            by: By::User,
         };
         let entry = Entry::new(&p.name, &p.spec, origin);
         match self.library.save(p.scope, &entry) {
@@ -1097,6 +1098,7 @@ mod tests {
         let (_, at, entry) = lib.load("hero").unwrap();
         assert_eq!(at.display().to_string(), path);
         assert_eq!(entry.spec["children"][0]["value"], "Ada");
+        assert_eq!(entry.origin.by, By::User);
         assert_eq!(
             (entry.origin.view.as_str(), entry.origin.pane.as_deref()),
             ("sheet", Some("p9"))
