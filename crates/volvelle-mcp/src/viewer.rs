@@ -1,6 +1,7 @@
 //! Connection to the viewer, which runs in its own herdr pane. Herdr only
 //! places the pane; all UI data moves over volvelle's own socket.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ use volvelle_schema::{Event, Request};
 
 pub struct Viewer {
     socket: PathBuf,
+    /// Passed to the viewer so Ctrl-S can save to the project library.
+    project: Option<PathBuf>,
     conn: Option<Conn>,
     /// The pane we split for the viewer, if we made one.
     pane: Option<String>,
@@ -22,6 +25,8 @@ pub struct Viewer {
 struct Conn {
     stream: UnixStream,
     events: Receiver<Option<Event>>,
+    /// Events read ahead by [`Viewer::saved`], in arrival order.
+    held: VecDeque<Option<Event>>,
 }
 
 pub enum Recv {
@@ -32,7 +37,7 @@ pub enum Recv {
 }
 
 impl Viewer {
-    pub fn new() -> Self {
+    pub fn new(project: Option<PathBuf>) -> Self {
         let socket = std::env::var_os("VOLVELLE_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -41,8 +46,13 @@ impl Viewer {
                     .unwrap_or_else(|_| std::process::id().to_string());
                 std::env::temp_dir().join(format!("volvelle-{tag}.sock"))
             });
+        Self::at(socket, project)
+    }
+
+    pub fn at(socket: PathBuf, project: Option<PathBuf>) -> Self {
         Viewer {
             socket,
+            project,
             conn: None,
             pane: None,
         }
@@ -64,22 +74,47 @@ impl Viewer {
 
     /// Takes the events that have already arrived.
     pub fn drain(&mut self) -> Vec<Event> {
-        let Some(conn) = &self.conn else {
+        let Some(conn) = &mut self.conn else {
             return Vec::new();
         };
-        let events: Vec<Event> = conn.events.try_iter().flatten().collect();
+        let held: Vec<_> = conn.held.drain(..).collect();
+        let events: Vec<Event> = held
+            .into_iter()
+            .chain(conn.events.try_iter())
+            .flatten()
+            .collect();
         if events.iter().any(|e| matches!(e, Event::Closed)) {
             self.forget();
         }
         events
     }
 
+    /// Takes the saves that have arrived, holding every other event for
+    /// [`Viewer::recv`] and [`Viewer::drain`] in order.
+    pub fn saved(&mut self) -> Vec<Event> {
+        let Some(conn) = &mut self.conn else {
+            return Vec::new();
+        };
+        let mut saved = Vec::new();
+        for ev in conn.events.try_iter() {
+            match ev {
+                Some(ev @ Event::Saved { .. }) => saved.push(ev),
+                other => conn.held.push_back(other),
+            }
+        }
+        saved
+    }
+
     pub fn recv(&mut self, deadline: Instant) -> Recv {
-        let Some(conn) = &self.conn else {
+        let Some(conn) = &mut self.conn else {
             return Recv::Gone;
         };
         let wait = deadline.saturating_duration_since(Instant::now());
-        match conn.events.recv_timeout(wait) {
+        let next = match conn.held.pop_front() {
+            Some(ev) => Ok(ev),
+            None => conn.events.recv_timeout(wait),
+        };
+        match next {
             Ok(Some(Event::Closed)) => {
                 self.forget();
                 Recv::Event(Event::Closed)
@@ -164,11 +199,17 @@ impl Viewer {
         let Some(pane) = reply["result"]["pane"]["pane_id"].as_str() else {
             bail!("herdr pane split returned no pane: {reply}");
         };
-        let cmd = format!(
+        let mut cmd = format!(
             "exec {} view --socket {}",
             shell_quote(&viewer_bin()),
             shell_quote(&self.socket.to_string_lossy())
         );
+        if let Some(project) = &self.project {
+            cmd.push_str(&format!(
+                " --project {}",
+                shell_quote(&project.to_string_lossy())
+            ));
+        }
         let status = Command::new("herdr")
             .args(["pane", "run", pane, &cmd])
             .status()?;
@@ -198,7 +239,11 @@ impl Conn {
             }
             let _ = tx.send(None);
         });
-        Ok(Conn { stream, events })
+        Ok(Conn {
+            stream,
+            events,
+            held: VecDeque::new(),
+        })
     }
 }
 
