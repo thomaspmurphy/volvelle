@@ -33,7 +33,9 @@ fields or buttons is display-only and cannot be waited on. Prefer a pattern when
 it carries safe defaults and its own protocol. Saved views: call `library` before composing a \
 view that may already exist, and render by name when one fits. `save` views likely to recur \
 (dashboards, forms, sheets, menus the session will come back to), not one-off questions. A \
-saved view is static: to adapt one, fetch it with `library {name}` and send a spec.";
+saved view is static: to adapt one, fetch it with `library {name}` and send a spec. Atoms \
+can `bind` to a `data` document, `update` patches it in place, and a saved template plus \
+`data` is the cheap way to redraw.";
 
 const RENDER_DESC: &str = "Show a view in the volvelle pane, opening the pane if needed. \
 Re-rendering the same `view` updates it in place and keeps what the user has typed or chosen; \
@@ -44,7 +46,10 @@ leaves_only makes Enter on a branch fold it instead of answering), input, \
 select (multi optional), toggle, button, progress, divider, pattern. Interactive atoms need \
 unique ids without `:`. Buttons submit every field's value. Pass exactly one of `spec` or \
 `saved`, a name from `library`; prefer `saved` when one fits, as it sends no spec. Returns the JSON Schema of the \
-eventual answer.\n\nExample: \
+eventual answer. Data binding: text, markdown, progress, list, table, input, toggle and \
+single select take `bind`, a JSON Pointer into `data`, in place of their literal (text, \
+value, items or rows). Every bind must resolve to the type its atom needs. Bound fields write \
+the user's input back into the answer's `data`; change the data later with `update`.\n\nExample: \
 {\"view\":\"deploy\",\"spec\":{\"type\":\"box\",\"title\":\"Deploy\",\"children\":[\
 {\"type\":\"select\",\"id\":\"env\",\"label\":\"Environment\",\"options\":[\"staging\",\"production\"]},\
 {\"type\":\"toggle\",\"id\":\"migrate\",\"label\":\"Run migrations\"},\
@@ -55,7 +60,9 @@ const WAIT_DESC: &str = "Wait for the user to answer a view: a button press (sub
 a selectable list or tree (select), Esc (cancel), or a pattern's typed answer (answer), whose `next` \
 says what the agent owes. Each carries every field's value. Returns \
 {\"status\":\"pending\"} if the timeout passes first; call again to keep waiting. Keep \
-timeouts short (default 60000 ms, max 300000) and loop. One answer per render.";
+timeouts short (default 60000 ms, max 300000) and loop. One answer per render. A view \
+rendered with `data` also returns `data`: the document with the user's input written back to \
+each bound field's pointer, or as it was on cancel.";
 
 const UPDATE_DESC: &str = "Patch the data of a view rendered with `data` and redraw what is \
 bound to it in place, far cheaper than a re-render. `patch` is a JSON Patch subset: \
