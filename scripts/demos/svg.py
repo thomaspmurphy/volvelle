@@ -170,6 +170,19 @@ def used(row):
     return any((ch.strip() and ch != "") or st[1] != BG for ch, st in row)
 
 
+def lift_status(frame):
+    """Move the status line, the last row record.py writes, up to one blank
+    row under this frame's view, so a view that shrinks leaves its spare rows
+    below the status line rather than above it."""
+    status, view = frame[-1], frame[:-1]
+    if not used(status):
+        return frame
+    last = max((y + 1 for y, r in enumerate(view) if used(r)), default=0)
+    blank = [(" ", (FG, BG, False, False, False, False, False))] * len(status)
+    rows = view[:last] + [blank, status]
+    return rows + [blank] * (len(frame) - len(rows))
+
+
 def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -305,7 +318,7 @@ class Painter:
 
 
 def font_face(path, chars, weight):
-    font = TTFont(path)
+    font = TTFont(path, recalcTimestamp=False)  # stable bytes across runs
     opts = subset.Options()
     opts.hinting = False
     opts.layout_features = []
@@ -323,7 +336,7 @@ def font_face(path, chars, weight):
 
 def render(name):
     doc = json.loads((DEMOS / f"{name}.frames.json").read_text())
-    frames = emulate(doc)
+    frames = [lift_status(f) for f in emulate(doc)]
     cols = doc["cols"]
     rows = max((y + 1 for f in frames for y, r in enumerate(f) if used(r)), default=1)
     frames = [f[:rows] for f in frames]
