@@ -7,7 +7,8 @@
 Reads each scripts/demos/<name>.frames.json written by record.py, emulates
 every frame with pyte and writes docs/images/demo-<name>.svg. Frame 0 is drawn
 plainly; each later frame is a layer that repaints only the rows that changed,
-shown at its start time by a CSS animation. No JavaScript, no SMIL, so GitHub
+shown at its start time by a CSS animation. When the view grows or shrinks,
+the window does too. No JavaScript, no SMIL, so GitHub
 renders it.
 
 Text is set in JetBrains Mono, subset and embedded, read from ~/Library/Fonts
@@ -365,24 +366,58 @@ def render(name):
     delays = [f["delay_ms"] / 1000 for f in doc["frames"]]
     delays[-1] = max(delays[-1], FINAL_HOLD)
     total = sum(delays)
+    starts = [sum(delays[:k]) for k in range(len(frames))] + [total]
+
+    def pct(t):
+        return f"{t / total * 100:.3f}".rstrip("0").rstrip(".")
 
     css = [font_face(regular_path, regular, 400), font_face(bold_path, bold, 700),
            f'text{{font-family:"{FAMILY}",monospace;font-size:{SIZE}px;white-space:pre}}']
+
+    # Frames in a row that fill the same number of rows share a window of that
+    # height. Each window is shown only while its frames are, so the window
+    # shrinks with the view; the canvas below it is transparent. Windows use
+    # opacity, which their layers' visibility cannot override.
+    heights = [max((y + 1 for y, r in enumerate(f) if used(r)), default=1) for f in frames]
+    runs = []
+    for k, h in enumerate(heights):
+        if runs and runs[-1][2] == h:
+            runs[-1][1] = k
+        else:
+            runs.append([k, k, h])
     body = []
-    for y, r in enumerate(frames[0]):
-        body += paint.row(y, r)
-    start = 0.0
-    for k in range(1, len(frames)):
-        start += delays[k - 1]
-        changed = [y for y in range(rows) if frames[k][y] != frames[k - 1][y]]
-        if not changed:
-            continue
-        p = f"{start / total * 100:.3f}".rstrip("0").rstrip(".")
-        css.append(f"@keyframes s{k}{{0%,{p}%{{visibility:hidden}}{p}%,100%{{visibility:visible}}}}"
-                   f".s{k}{{visibility:hidden;animation:s{k} {total:.2f}s step-end infinite}}")
-        body.append(f'<g class="s{k}">')
-        for y in changed:
-            body += paint.row(y, frames[k][y], clear=True)
+    for i, (first, last, h) in enumerate(runs):
+        cls = ""
+        if len(runs) > 1:
+            s0, s1 = pct(starts[first]), pct(starts[last + 1])
+            if first == 0:
+                frames_css = f"0%,{s1}%{{opacity:1}}{s1}%,100%{{opacity:0}}"
+            elif last == len(frames) - 1:
+                frames_css = f"0%,{s0}%{{opacity:0}}{s0}%,100%{{opacity:1}}"
+            else:
+                frames_css = (f"0%,{s0}%{{opacity:0}}{s0}%,{s1}%{{opacity:1}}"
+                              f"{s1}%,100%{{opacity:0}}")
+            hidden = "" if first == 0 else "opacity:0;"
+            css.append(f"@keyframes w{i}{{{frames_css}}}"
+                       f".w{i}{{{hidden}animation:w{i} {total:.2f}s step-end infinite}}")
+            cls = f' class="w{i}"'
+        window = BAR + GAP + h * CELL_H + PAD
+        body.append(f'<g{cls} fill="{FG}">'
+                    f'<rect x="0.5" y="0.5" width="{num(width - 1)}" height="{num(window - 1)}" '
+                    f'rx="12" fill="{BG}" stroke="{STROKE}"/>')
+        for y in range(h):
+            body += paint.row(y, frames[first][y])
+        for k in range(first + 1, last + 1):
+            changed = [y for y in range(h) if frames[k][y] != frames[k - 1][y]]
+            if not changed:
+                continue
+            p = pct(starts[k])
+            css.append(f"@keyframes s{k}{{0%,{p}%{{visibility:hidden}}{p}%,100%{{visibility:visible}}}}"
+                       f".s{k}{{visibility:hidden;animation:s{k} {total:.2f}s step-end infinite}}")
+            body.append(f'<g class="s{k}">')
+            for y in changed:
+                body += paint.row(y, frames[k][y], clear=True)
+            body.append("</g>")
         body.append("</g>")
 
     dots = "".join(f'<circle cx="{PAD + 6 + 20 * i}" cy="{BAR / 2}" r="6" fill="{c}"/>'
@@ -391,18 +426,16 @@ def render(name):
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{num(width)}" height="{num(height)}" '
         f'viewBox="0 0 {num(width)} {num(height)}">'
         f'<style>{"".join(css)}</style>'
-        f'<rect x="0.5" y="0.5" width="{num(width - 1)}" height="{num(height - 1)}" rx="12" '
-        f'fill="{BG}" stroke="{STROKE}"/>'
+        + "\n".join(body) +
         f'{dots}'
         f'<text x="{num(width / 2)}" y="{num(BAR / 2 + 4)}" text-anchor="middle" '
         f'style="font-size:12px;fill:{TITLE}">{esc(doc["title"])}</text>'
-        f'<g fill="{FG}">' + "\n".join(body) + "</g>"
         "</svg>\n"
     )
     out = OUT / f"demo-{name}.svg"
     out.write_text(svg)
     print(f"{out.relative_to(ROOT)}: {len(svg) // 1024} KB, {len(frames)} frames, "
-          f"{cols}x{rows}, {total:.1f}s loop")
+          f"{cols}x{rows}, {total:.1f}s loop, {len(runs)} window heights")
 
 
 def main():
