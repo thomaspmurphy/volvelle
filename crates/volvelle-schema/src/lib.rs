@@ -14,6 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub mod library;
 mod tree;
 pub use tree::{Flat, TreeItem, TreeNode};
 
