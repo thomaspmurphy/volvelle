@@ -14,6 +14,8 @@ use serde_json::{Map, Value, json};
 pub enum Kind {
     Start,
     Render,
+    /// The agent patched a view's data.
+    Update,
     Answer,
     Pending,
     Refusal,
@@ -28,6 +30,7 @@ impl Kind {
         match self {
             Kind::Start => "start",
             Kind::Render => "render",
+            Kind::Update => "update",
             Kind::Answer => "answer",
             Kind::Pending => "pending",
             Kind::Refusal => "refusal",

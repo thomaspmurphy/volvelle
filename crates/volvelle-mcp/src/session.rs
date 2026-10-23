@@ -1,11 +1,12 @@
 //! Runtime monitor for the view lifecycle session type:
 //!
 //! ```text
-//! View = !Render . (!Render)* . ?Event . end
+//! View = !Render . (!Render | !Update)* . ?Event . end
 //! ```
 //!
-//! The agent renders a view, may re-render it any number of times (each
-//! re-render keeps what the user entered), then waits for exactly one answer.
+//! The agent renders a view, may re-render it or patch its data any number
+//! of times (each keeps what the user entered), then waits for exactly one
+//! answer. A display-only view takes updates until it is replaced or closed.
 //! LLMs cannot be type-checked, so every tool call is checked here instead,
 //! and a call out of order is refused with the moves that are allowed next.
 //!
@@ -123,6 +124,23 @@ impl Monitor {
         }
     }
 
+    /// May the agent patch this view's data? Wherever a re-render of the
+    /// view on screen is allowed, display-only views included. Returns the
+    /// move that is allowed after the update.
+    pub fn check_update(&self, view: &str) -> Result<String, Refusal> {
+        self.owed(Some(view))?;
+        let refuse = |why: String| Err(Refusal(format!("{why}; allowed next: render")));
+        match self.views.get(view) {
+            Some(State::Awaiting) => Ok("update, wait_event".into()),
+            Some(State::Display) => Ok("update, render, close when done".into()),
+            Some(State::Answered(_)) => Ok("update, render".into()),
+            Some(State::Owes(_)) => Ok(format!("render view {view:?} to report the outcome")),
+            None => refuse(format!("no view {view:?} has been rendered")),
+            Some(State::Replaced(by)) => refuse(format!("view {view:?} was replaced by {by:?}")),
+            Some(State::Closed) => refuse(format!("view {view:?} was closed")),
+        }
+    }
+
     /// Feeds a viewer event in. Returns it if it answers `view`; a pattern
     /// answer gains a `next` hint saying what the agent owes.
     pub fn accept(&mut self, view: &str, event: &Event) -> Option<Value> {
@@ -232,6 +250,46 @@ mod tests {
         assert!(m.check_wait("form").is_err());
     }
 
+    #[test]
+    fn updates_follow_the_view_on_screen() {
+        let mut m = Monitor::default();
+        let refusal = |r: Result<String, Refusal>| match r {
+            Err(Refusal(msg)) => msg,
+            Ok(next) => panic!("allowed, next {next}"),
+        };
+        assert_eq!(
+            refusal(m.check_update("a")),
+            "no view \"a\" has been rendered; allowed next: render"
+        );
+        m.rendered("status", false, None);
+        assert_eq!(
+            m.check_update("status").ok().unwrap(),
+            "update, render, close when done"
+        );
+        m.rendered("a", true, None);
+        assert_eq!(
+            refusal(m.check_update("status")),
+            "view \"status\" was replaced by \"a\"; allowed next: render"
+        );
+        assert_eq!(m.check_update("a").ok().unwrap(), "update, wait_event");
+        let updated = Event::Updated {
+            view: "a".into(),
+            kept: vec!["/name".into()],
+        };
+        assert!(
+            m.accept("a", &updated).is_none(),
+            "an update is not an answer"
+        );
+        assert!(m.check_wait("a").is_ok());
+        assert!(m.accept("a", &submit("a")).is_some());
+        assert_eq!(m.check_update("a").ok().unwrap(), "update, render");
+        m.closed();
+        assert_eq!(
+            refusal(m.check_update("a")),
+            "view \"a\" was closed; allowed next: render"
+        );
+    }
+
     fn answer(view: &str, value: Value) -> Event {
         Event::Answer {
             view: view.into(),
@@ -260,6 +318,11 @@ mod tests {
             let Err(Refusal(msg)) = result else { panic!() };
             assert_eq!(msg, refusal);
         }
+        assert_eq!(
+            m.check_update("drop").ok().unwrap(),
+            "render view \"drop\" to report the outcome"
+        );
+        assert!(m.check_update("other").is_err());
         m.closed();
         assert!(m.owes("drop"), "closing the pane does not discharge it");
         assert!(m.check_render("drop").is_ok());
