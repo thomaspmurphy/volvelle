@@ -21,6 +21,11 @@ Houghton Library, Harvard University (Typ 520.40.150), via
 volvelle shows the scene with signal and badge gauges, the last roll, and a
 selectable list of actions whose answer goes back to the agent.*
 
+![An agent asks for a crate name and two options; the user types, toggles and submits](docs/images/demo-form.gif)
+
+*A form answered in the viewer. Once it is sent the view locks until the
+agent renders again.*
+
 ## Status
 
 Phase 1 of the architecture: one agent, one view.
@@ -173,6 +178,8 @@ without its data. See `examples/bound-sheet.json` with
 volvelle show examples/bound-sheet.json --data examples/bound-sheet.data.json
 ```
 
+![The character sheet's HP drops and an antidote joins the inventory as the agent sends updates](docs/images/demo-binding.gif)
+
 ## Patterns
 
 A pattern is a named, versioned composition with slots, a typed answer and
@@ -234,6 +241,8 @@ the node's value; without one it is display-only. With `leaves_only: true`
 only nodes without children answer, and Enter on a node with children folds
 or unfolds it. See `examples/tree.json`.
 
+![Moving through examples/tree.json, unfolding volvelle-mcp and folding it again](docs/images/demo-tree.gif)
+
 A `graph` holds `nodes`, each an `id` with an optional `label` (the id by
 default) and `tone`, and `edges`, each `from` and `to` a node id with an
 optional `label`. The agent never places anything: the viewer lays the graph
@@ -255,6 +264,8 @@ follow the focus marker. With an `id` the graph is selectable and Enter
 answers `select` with the node's id; without one it is display-only. See
 `examples/graph.json`, volvelle's own view lifecycle, and
 `examples/deps.json`.
+
+![The view lifecycle graph, its highlight stepped from Awaiting to Closed by updates](docs/images/demo-graph.gif)
 
 ## Saved views
 
@@ -342,3 +353,18 @@ viewer.
 | `VOLVELLE_FOCUS=1` | Focus the viewer pane when it opens. Off by default. |
 | `VOLVELLE_USER_LIBRARY` | Directory of the user's saved views. Defaults to `$XDG_DATA_HOME/volvelle/library`, else `~/.local/share/volvelle/library`. |
 | `VOLVELLE_LOG_DIR` | Directory for session logs (JSONL, one file per server process). Defaults to `$XDG_STATE_HOME/volvelle/sessions`, else `~/.local/state/volvelle/sessions`. |
+
+## Regenerating the demos
+
+The GIFs in `docs/images/demo-*.gif` are recorded from the real viewer by
+`scripts/demos/record.py`, which drives `volvelle-mcp` like an agent and
+reads its herdr pane after each step. It writes terminalizer recordings to
+`scripts/demos/*.yml`, and `scripts/demos/render.sh` renders them. You need
+herdr (run it from a herdr pane), Python 3, Node with
+`npm install -g terminalizer`, and optionally gifsicle to shrink the GIFs.
+
+```sh
+cargo build --release
+python3 scripts/demos/record.py   # or name demos: form binding tree graph
+scripts/demos/render.sh
+```
