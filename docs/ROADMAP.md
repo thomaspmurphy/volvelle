@@ -129,9 +129,11 @@ canvas is ruled out, since it would give validation nothing to check.
   crossings, route edges with box-drawing characters), sized for a few dozen
   nodes. `current` highlights a node and binds, so `update` moves it; with
   an `id`, arrows move a focus marker and Enter answers with the node id.
-- `state-machine@1` pattern on the graph atom: start and end states,
-  labelled transitions, and a highlighted `current` slot. First use: draw
-  volvelle's own session types live, with the monitor's state lit up.
+- Done: `state-machine@1` pattern on the graph atom: start and end states,
+  labelled transitions, and a highlighted `current` slot. First use:
+  `examples/session-types.json` draws volvelle's own session types, kept in
+  step with the monitor's states by a test. Drawing them live, with the
+  monitor's state lit up, is still to come.
 - Animation is data changing (item 5): updating `current` moves the
   highlight. A `trace` slot plays a sequence of states locally, with pause
   and scrub. Streaming many updates needs phase 4's frame batching.
