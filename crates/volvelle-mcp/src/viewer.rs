@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -154,6 +154,7 @@ impl Viewer {
         if self.conn.is_some() {
             return Ok(());
         }
+        socket_fits(&self.socket).map_err(anyhow::Error::msg)?;
         // A viewer may already be listening: ours from earlier, or one the
         // user started by hand.
         if let Ok(stream) = UnixStream::connect(&self.socket) {
@@ -247,6 +248,26 @@ impl Conn {
     }
 }
 
+/// Size of `sun_path`, which holds a Unix socket's path and its NUL.
+#[cfg(target_os = "linux")]
+const SUN_PATH: usize = 108;
+#[cfg(not(target_os = "linux"))]
+const SUN_PATH: usize = 104;
+
+/// A path too long for `sun_path` cannot be bound, and the viewer would
+/// fail without saying why, so refuse it before opening a pane.
+fn socket_fits(path: &Path) -> Result<(), String> {
+    let len = path.as_os_str().len();
+    if len < SUN_PATH {
+        return Ok(());
+    }
+    Err(format!(
+        "the socket path {} is {len} bytes, but Unix socket paths must be under {SUN_PATH} bytes \
+         here; set VOLVELLE_SOCKET to a shorter path, such as /tmp/volvelle.sock",
+        path.display()
+    ))
+}
+
 /// The viewer binary: `VOLVELLE_BIN`, else next to this executable, else PATH.
 fn viewer_bin() -> String {
     if let Ok(bin) = std::env::var("VOLVELLE_BIN") {
@@ -262,4 +283,23 @@ fn viewer_bin() -> String {
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_socket_paths_are_refused_before_spawning() {
+        let fits = PathBuf::from(format!("/{}", "s".repeat(SUN_PATH - 2)));
+        assert!(socket_fits(&fits).is_ok());
+        let long = PathBuf::from(format!("/{}", "s".repeat(SUN_PATH - 1)));
+        let err = socket_fits(&long).unwrap_err();
+        assert!(err.contains(&format!("is {SUN_PATH} bytes")), "{err}");
+        assert!(err.contains("set VOLVELLE_SOCKET"), "{err}");
+        let mut viewer = Viewer::at(long, None);
+        let err = viewer.send(&Request::Close).unwrap_err().to_string();
+        assert!(err.contains("set VOLVELLE_SOCKET"), "{err}");
+        assert!(viewer.pane.is_none());
+    }
 }
