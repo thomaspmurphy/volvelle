@@ -21,7 +21,7 @@ Houghton Library, Harvard University (Typ 520.40.150), via
 volvelle shows the scene with signal and badge gauges, the last roll, and a
 selectable list of actions whose answer goes back to the agent.*
 
-![An agent asks for a crate name and two options; the user types, toggles and submits](docs/images/demo-form.gif)
+![An agent asks for a crate name and two options; the user types, toggles and submits](docs/images/demo-form.svg)
 
 *A form answered in the viewer. Once it is sent the view locks until the
 agent renders again.*
@@ -178,7 +178,7 @@ without its data. See `examples/bound-sheet.json` with
 volvelle show examples/bound-sheet.json --data examples/bound-sheet.data.json
 ```
 
-![The character sheet's HP drops and an antidote joins the inventory as the agent sends updates](docs/images/demo-binding.gif)
+![The character sheet's HP drops and an antidote joins the inventory as the agent sends updates](docs/images/demo-binding.svg)
 
 ## Patterns
 
@@ -233,6 +233,8 @@ id>}`; the entry point is never focused, lit or answered. It owes nothing
 after its answer. `examples/session-types.json` draws volvelle's own view
 lifecycle and the `confirm-destructive@1` protocol this way.
 
+![volvelle's view lifecycle as a state machine, its light moved from Awaiting through Owes and Display to Closed by updates](docs/images/demo-machine.svg)
+
 A `tree` holds nested `nodes`, each with a `label`, optional `detail` and
 `children`, and `open: false` to start folded. A node's value defaults to its
 path of labels joined with `/`, such as `src/app/main.rs`, and values must be
@@ -241,7 +243,7 @@ the node's value; without one it is display-only. With `leaves_only: true`
 only nodes without children answer, and Enter on a node with children folds
 or unfolds it. See `examples/tree.json`.
 
-![Moving through examples/tree.json, unfolding volvelle-mcp and folding it again](docs/images/demo-tree.gif)
+![Moving through examples/tree.json, unfolding volvelle-mcp and folding it again](docs/images/demo-tree.svg)
 
 A `graph` holds `nodes`, each an `id` with an optional `label` (the id by
 default) and `tone`, and `edges`, each `from` and `to` a node id with an
@@ -265,7 +267,7 @@ answers `select` with the node's id; without one it is display-only. See
 `examples/graph.json`, volvelle's own view lifecycle, and
 `examples/deps.json`.
 
-![The view lifecycle graph, its highlight stepped from Awaiting to Closed by updates](docs/images/demo-graph.gif)
+![The view lifecycle graph, its highlight stepped from Awaiting to Closed by updates](docs/images/demo-graph.svg)
 
 ## Saved views
 
@@ -356,15 +358,17 @@ viewer.
 
 ## Regenerating the demos
 
-The GIFs in `docs/images/demo-*.gif` are recorded from the real viewer by
-`scripts/demos/record.py`, which drives `volvelle-mcp` like an agent and
-reads its herdr pane after each step. It writes terminalizer recordings to
-`scripts/demos/*.yml`, and `scripts/demos/render.sh` renders them. You need
-herdr (run it from a herdr pane), Python 3, Node with
-`npm install -g terminalizer`, and optionally gifsicle to shrink the GIFs.
+The animated SVGs in `docs/images/demo-*.svg` are recorded from the real
+viewer. `scripts/demos/record.py` drives `volvelle-mcp` like an agent, reads
+its herdr pane after each step and writes the frames as ANSI text to
+`scripts/demos/*.frames.json`, so it needs herdr (run it from a herdr pane)
+and Python 3. `scripts/demos/svg.py` renders the committed frames without
+herdr; it needs [uv](https://docs.astral.sh/uv/) and JetBrains Mono Regular
+and Bold in `~/Library/Fonts`, or in the directory `DEMO_FONT_DIR` names,
+which it subsets and embeds.
 
 ```sh
 cargo build --release
-python3 scripts/demos/record.py   # or name demos: form binding tree graph
-scripts/demos/render.sh
+python3 scripts/demos/record.py   # or name demos: form binding tree graph machine
+uv run scripts/demos/svg.py       # or name demos
 ```
