@@ -17,10 +17,12 @@ use serde_json::{Map, Value, json};
 mod bind;
 mod graph;
 pub mod library;
+mod machine;
 mod patch;
 mod tree;
 pub use bind::{bind, check_binds, resolve, write_back};
 pub use graph::{Edge, Flow, GraphNode, MAX_EDGES, MAX_NODES, Vertex};
+pub use machine::StateMachine;
 pub use patch::{Op, apply_patch, touches};
 pub use tree::{Flat, TreeItem, TreeNode};
 
@@ -321,6 +323,9 @@ pub enum Pattern {
     /// A list beside a preview of the item under the cursor.
     #[serde(rename = "choose-with-preview@1")]
     ChooseWithPreview(ChooseWithPreview),
+    /// A state diagram with the current state lit, drawn as a graph.
+    #[serde(rename = "state-machine@1")]
+    StateMachine(Box<StateMachine>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -428,7 +433,20 @@ pub static CHOOSE_WITH_PREVIEW: PatternInfo = PatternInfo {
     after_answer: |_| Obligation::None,
 };
 
-static PATTERNS: &[&PatternInfo] = &[&CONFIRM_DESTRUCTIVE, &CHOOSE_WITH_PREVIEW];
+pub static STATE_MACHINE: PatternInfo = PatternInfo {
+    name: "state-machine@1",
+    summary: "A state diagram: states, a start the entry point leads to, end states marked \
+        with ◉, and labelled transitions, laid out by the viewer as a graph. `current` lights \
+        a state; bind it instead and `update` moves the light. Every state must be reachable \
+        from start, and end states have no outgoing transitions. With an id, Enter on a state \
+        answers like a graph. Does not count toward the one pattern per view.",
+    protocol: "!Spec . end without an id, or !Spec . ?{select: end, cancel: end} with one",
+    returns: r#"nothing without an id; with one, {"type": "select", "id": id, "value": state id} in place of an answer"#,
+    slots: slot_schema::<StateMachine>,
+    after_answer: |_| Obligation::None,
+};
+
+static PATTERNS: &[&PatternInfo] = &[&CONFIRM_DESTRUCTIVE, &CHOOSE_WITH_PREVIEW, &STATE_MACHINE];
 
 /// Every pattern the catalog knows.
 pub fn patterns() -> &'static [&'static PatternInfo] {
@@ -444,14 +462,23 @@ impl Pattern {
         match self {
             Pattern::ConfirmDestructive(_) => &CONFIRM_DESTRUCTIVE,
             Pattern::ChooseWithPreview(_) => &CHOOSE_WITH_PREVIEW,
+            Pattern::StateMachine(_) => &STATE_MACHINE,
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> Option<&str> {
         match self {
-            Pattern::ConfirmDestructive(p) => &p.id,
-            Pattern::ChooseWithPreview(p) => &p.id,
+            Pattern::ConfirmDestructive(p) => Some(&p.id),
+            Pattern::ChooseWithPreview(p) => Some(&p.id),
+            Pattern::StateMachine(p) => p.id.as_deref(),
         }
+    }
+
+    /// Whether the pattern answers with its own typed value, and so holds
+    /// its view's session type. A state machine answers like the graph it
+    /// draws, so a view may hold it beside another pattern.
+    pub fn answers(&self) -> bool {
+        !matches!(self, Pattern::StateMachine(_))
     }
 
     /// JSON Schema of this instance's answer value.
@@ -475,7 +502,21 @@ impl Pattern {
                     "required": ["selected"]
                 })
             }
+            Pattern::StateMachine(p) => json!({"enum": p.ids()}),
         }
+    }
+}
+
+/// The spec with each state-machine@1 replaced by the graph it draws, as
+/// the viewer lays it out.
+pub fn expand(root: &Node) -> Node {
+    match root {
+        Node::Box(b) => Node::Box(BoxNode {
+            children: b.children.iter().map(expand).collect(),
+            ..b.clone()
+        }),
+        Node::Pattern(Pattern::StateMachine(s)) => Node::Graph(s.graph()),
+        n => n.clone(),
     }
 }
 
@@ -490,7 +531,7 @@ impl Node {
             Node::Select(n) => Some(&n.id),
             Node::Toggle(n) => Some(&n.id),
             Node::Button(n) => Some(&n.id),
-            Node::Pattern(p) => Some(p.id()),
+            Node::Pattern(p) => p.id(),
             _ => None,
         }
     }
@@ -507,6 +548,7 @@ impl Node {
             Node::Toggle(n) => n.bind.as_deref(),
             Node::Progress(n) => n.bind.as_deref(),
             Node::Graph(n) => n.bind.as_deref(),
+            Node::Pattern(Pattern::StateMachine(n)) => n.bind.as_deref(),
             _ => None,
         }
     }
@@ -654,6 +696,7 @@ pub fn validate(root: &Node) -> Result<(), Vec<Violation>> {
                     &["a value from 0.0 to 1.0"],
                 ));
             }
+            Node::Pattern(p) if !p.answers() => pattern_slots(p, path, &mut errors),
             Node::Pattern(p) => {
                 if let Some((first, _)) = patterns.first() {
                     errors.push(Violation::new(
@@ -725,6 +768,7 @@ fn pattern_slots(p: &Pattern, path: &str, errors: &mut Vec<Violation>) {
                 ));
             }
         }
+        Pattern::StateMachine(s) => errors.extend(s.problems(path)),
     }
 }
 
@@ -774,7 +818,12 @@ pub fn result_schema(root: &Node) -> Value {
         Node::Graph(g @ GraphNode { id: Some(id), .. }) => {
             lists.push(select_variant(id, &g.ids()));
         }
-        Node::Pattern(p) => answers.push(json!({
+        Node::Pattern(Pattern::StateMachine(s)) => {
+            if let Some(id) = &s.id {
+                lists.push(select_variant(id, &s.ids()));
+            }
+        }
+        Node::Pattern(p) if p.answers() => answers.push(json!({
             "type": "object",
             "properties": {
                 "type": {"const": "answer"},
@@ -807,7 +856,7 @@ pub fn result_schema(root: &Node) -> Value {
     })
 }
 
-/// The `select` answer of a list, tree or graph, whose value is one of `values`.
+/// The `select` answer of a list, tree, graph or state machine, whose value is one of `values`.
 fn select_variant(id: &str, values: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -1236,5 +1285,212 @@ mod tests {
         assert!(parse_spec(unknown).is_err());
         let direction = json!({"type": "graph", "direction": "up", "nodes": []});
         assert!(parse_spec(direction).is_err());
+    }
+
+    fn machine() -> Value {
+        json!({"type": "pattern", "name": "state-machine@1", "id": "state", "title": "Job",
+               "states": [{"id": "queued"}, {"id": "running", "label": "Running", "tone": "accent"},
+                          {"id": "done"}, {"id": "failed", "label": "Failed"}],
+               "start": "queued", "end": ["done", "failed"], "transitions": [
+                   {"from": "queued", "to": "running", "label": "pick"},
+                   {"from": "running", "to": "running", "label": "tick"},
+                   {"from": "running", "to": "done"},
+                   {"from": "running", "to": "failed", "label": "error"}
+               ], "current": "running"})
+    }
+
+    #[test]
+    fn state_machines_answer_with_state_ids() {
+        let spec = parse_spec(machine()).unwrap();
+        assert_eq!(spec.id(), Some("state"));
+        let schema = result_schema(&spec);
+        let select = &schema["oneOf"][1]["properties"];
+        assert_eq!(select["type"]["const"], "select");
+        assert_eq!(select["id"]["const"], "state");
+        assert_eq!(
+            select["value"]["enum"],
+            json!(["queued", "running", "done", "failed"])
+        );
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            (STATE_MACHINE.after_answer)(&json!("done")),
+            Obligation::None
+        );
+
+        let mut display = machine();
+        display.as_object_mut().unwrap().remove("id");
+        let display = parse_spec(display).unwrap();
+        assert_eq!(display.id(), None);
+        assert_eq!(
+            result_schema(&display)["oneOf"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn state_machines_expand_to_a_graph_with_an_entry_point() {
+        let mut bound = machine();
+        bound.as_object_mut().unwrap().remove("current");
+        bound["bind"] = json!("/job");
+        bound["direction"] = json!("right");
+        let Node::Graph(g) = expand(&parse_spec(bound).unwrap()) else {
+            panic!("expected a graph")
+        };
+        assert_eq!(
+            (g.id.as_deref(), g.title.as_deref(), g.direction),
+            (Some("state"), Some("Job"), Flow::Right)
+        );
+        assert_eq!(
+            (g.bind.as_deref(), g.current.as_deref()),
+            (Some("/job"), None)
+        );
+        let labels: Vec<(&str, &str, bool)> = g
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.label(), n.inert))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("", "●", true),
+                ("queued", "queued", false),
+                ("running", "Running", false),
+                ("done", "done ◉", false),
+                ("failed", "Failed ◉", false),
+            ]
+        );
+        assert_eq!(g.nodes[2].tone, Tone::Accent);
+        let edges: Vec<(&str, &str, Option<&str>)> = g
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str(), e.label.as_deref()))
+            .collect();
+        assert_eq!(edges[0], ("", "queued", None));
+        assert_eq!(edges[1], ("queued", "running", Some("pick")));
+        assert_eq!(edges.len(), 5);
+        assert_eq!(g.ids(), ["queued", "running", "done", "failed"]);
+
+        let Node::Graph(lit) = expand(&parse_spec(machine()).unwrap()) else {
+            panic!("expected a graph")
+        };
+        assert_eq!(lit.current.as_deref(), Some("running"));
+        let Node::Box(b) =
+            expand(&parse_spec(json!({"type": "box", "children": [machine()]})).unwrap())
+        else {
+            panic!("expected a box")
+        };
+        assert!(matches!(b.children[0], Node::Graph(_)));
+    }
+
+    #[test]
+    fn rejects_bad_state_machines() {
+        let spec = json!({"type": "box", "children": [{"type": "pattern", "name": "state-machine@1",
+            "states": [{"id": "a"}, {"id": ""}, {"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}],
+            "start": "a", "end": ["b", "z"], "transitions": [
+                {"from": "a", "to": "b"},
+                {"from": "b", "to": "a", "label": "back"},
+                {"from": "y", "to": "x"},
+                {"from": "d", "to": "c"}
+            ], "current": "e"}]});
+        let text: Vec<String> = errors(spec).iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /children/0/states/1/id: state id is empty; allowed: a short name such as \"idle\"",
+                "at /children/0/states/2/id: state id \"a\" is not unique, first used at /children/0/states/0; allowed: a distinct \"id\" on this state",
+                "at /children/0/end/1: end \"z\" names no state; allowed: \"a\", \"b\", \"c\", \"d\"",
+                "at /children/0/transitions/1: transition leaves end state \"b\"; allowed: a transition from a state that is not an end, \"b\" left out of `end`",
+                "at /children/0/transitions/2/from: transition from \"y\" names no state; allowed: \"a\", \"b\", \"c\", \"d\"",
+                "at /children/0/transitions/2/to: transition to \"x\" names no state; allowed: \"a\", \"b\", \"c\", \"d\"",
+                "at /children/0/current: current \"e\" names no state; allowed: \"a\", \"b\", \"c\", \"d\"",
+                "at /children/0/states/4: state \"c\" cannot be reached from start \"a\"; allowed: a transition into \"c\", no such state",
+                "at /children/0/states/5: state \"d\" cannot be reached from start \"a\"; allowed: a transition into \"d\", no such state",
+            ]
+        );
+
+        let empty =
+            json!({"type": "pattern", "name": "state-machine@1", "states": [], "start": "a"});
+        let text: Vec<String> = errors(empty).iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /states: state-machine@1 has no states; allowed: at least one state",
+                "at /start: start \"a\" names no state; allowed: the id of a state in `states`",
+            ]
+        );
+
+        let states: Vec<Value> = (0..=MAX_NODES)
+            .map(|i| json!({"id": format!("s{i}")}))
+            .collect();
+        let transitions: Vec<Value> = (0..=MAX_NODES)
+            .map(|i| json!({"from": "s0", "to": format!("s{i}")}))
+            .chain((0..MAX_EDGES).map(|_| json!({"from": "s0", "to": "s1"})))
+            .collect();
+        let big = errors(json!({"type": "pattern", "name": "state-machine@1",
+            "states": states, "start": "s0", "transitions": transitions}));
+        let text: Vec<String> = big.iter().map(Violation::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "at /states: state machine has 65 states, more than 64; allowed: at most 64 states, several smaller machines",
+                "at /transitions: state machine has 321 transitions, more than 256; allowed: at most 256 transitions, several smaller machines",
+            ]
+        );
+
+        let mut both = machine();
+        both["bind"] = json!("/job");
+        assert_eq!(
+            parse_spec(both).unwrap_err(),
+            "at /: state-machine@1 has both `current` and `bind`; allowed: `current`, `bind`"
+        );
+        let mut unknown = machine();
+        unknown["states"][0]["inert"] = json!(true);
+        assert!(parse_spec(unknown).is_err(), "specs cannot set inert");
+    }
+
+    #[test]
+    fn bound_state_must_name_a_state() {
+        let mut spec = machine();
+        spec.as_object_mut().unwrap().remove("current");
+        spec["bind"] = json!("/job");
+        let spec = parse_spec(spec).unwrap();
+        let Node::Pattern(Pattern::StateMachine(m)) =
+            bind(&spec, Some(&json!({"job": "done"}))).unwrap()
+        else {
+            panic!("expected a state machine")
+        };
+        assert_eq!(m.current.as_deref(), Some("done"));
+        assert_eq!(
+            bind(&spec, Some(&json!({"job": "lost"}))).unwrap_err(),
+            "at /bind: bind \"/job\" holds \"lost\", which is not a state of the machine; allowed: \"queued\", \"running\", \"done\", \"failed\""
+        );
+        assert_eq!(
+            bind(&spec, Some(&json!({"job": ""}))).unwrap_err(),
+            "at /bind: bind \"/job\" holds \"\", which is not a state of the machine; allowed: \"queued\", \"running\", \"done\", \"failed\"",
+            "the entry point is never current"
+        );
+        assert!(
+            bind(&spec, Some(&json!({"job": 1})))
+                .unwrap_err()
+                .contains("but state-machine@1 needs a state id")
+        );
+    }
+
+    #[test]
+    fn state_machines_sit_beside_another_pattern() {
+        let mut display = machine();
+        display.as_object_mut().unwrap().remove("id");
+        let spec = json!({"type": "box", "children": [
+            display,
+            {"type": "pattern", "name": "choose-with-preview@1", "id": "pick",
+             "items": [{"label": "a", "preview": "a"}]}
+        ]});
+        parse_spec(spec).unwrap();
+        let confirm_beside = json!({"type": "box", "children": [machine(), confirm()]});
+        assert!(
+            parse_spec(confirm_beside)
+                .unwrap_err()
+                .contains("the view also has \"state\" at /children/0")
+        );
     }
 }

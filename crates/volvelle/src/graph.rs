@@ -15,6 +15,8 @@ use layout::{Area, Picture};
 /// A selectable graph's focus marker and pan, indexed in node order.
 pub struct GraphState {
     ids: Vec<String>,
+    /// Nodes the marker skips, such as a state machine's entry point.
+    inert: Vec<bool>,
     centers: Vec<(usize, usize)>,
     /// The node under the focus marker.
     cursor: usize,
@@ -23,18 +25,21 @@ pub struct GraphState {
 }
 
 impl GraphState {
-    /// The marker starts on the current node, else the first.
+    /// The marker starts on the current node, else the first it can rest on.
     pub fn new(g: &GraphNode) -> Self {
         let p = layout::layout(g);
         let ids: Vec<String> = g.nodes.iter().map(|n| n.id.clone()).collect();
+        let inert: Vec<bool> = g.nodes.iter().map(|n| n.inert).collect();
         let cursor = g
             .current
             .as_ref()
-            .and_then(|c| ids.iter().position(|id| id == c))
+            .and_then(|c| (0..ids.len()).find(|&i| !inert[i] && ids[i] == *c))
+            .or_else(|| inert.iter().position(|i| !i))
             .unwrap_or(0);
         GraphState {
             centers: p.boxes.iter().map(Area::center).collect(),
             ids,
+            inert,
             cursor,
             pan: (0, 0),
         }
@@ -44,7 +49,8 @@ impl GraphState {
     /// the pan.
     pub fn carry(mut self, prev: GraphState) -> GraphState {
         let was = prev.ids.get(prev.cursor);
-        if let Some(i) = self.ids.iter().position(|id| Some(id) == was) {
+        if let Some(i) = (0..self.ids.len()).find(|&i| !self.inert[i] && Some(&self.ids[i]) == was)
+        {
             self.cursor = i;
         }
         self.pan = prev.pan;
@@ -59,7 +65,9 @@ impl GraphState {
             KeyCode::Down | KeyCode::Char('j') => self.step(0, 1),
             KeyCode::Left | KeyCode::Char('h') => self.step(-1, 0),
             KeyCode::Right | KeyCode::Char('l') => self.step(1, 0),
-            KeyCode::Enter if !self.ids.is_empty() => return Some(self.ids[self.cursor].clone()),
+            KeyCode::Enter if !self.inert.get(self.cursor).unwrap_or(&true) => {
+                return Some(self.ids[self.cursor].clone());
+            }
             _ => {}
         }
         None
@@ -80,7 +88,7 @@ impl GraphState {
             } else {
                 (oy * dy, ox.abs())
             };
-            if i == self.cursor || along <= 0 {
+            if i == self.cursor || self.inert[i] || along <= 0 {
                 continue;
             }
             let score = along + 2 * across;
@@ -118,7 +126,7 @@ pub fn lines(g: &GraphNode, p: &Picture, app: &App) -> Vec<Line<'static>> {
         paint(a, palette::muted(), false);
     }
     for (i, (v, a)) in g.nodes.iter().zip(&p.boxes).enumerate() {
-        let current = g.current.as_deref() == Some(v.id.as_str());
+        let current = !v.inert && g.current.as_deref() == Some(v.id.as_str());
         let border = if current {
             palette::accent().add_modifier(Modifier::BOLD)
         } else {
@@ -384,5 +392,73 @@ mod tests {
             panic!("expected select")
         };
         assert_eq!(value, "right");
+    }
+
+    fn machine() -> Value {
+        json!({"type": "pattern", "name": "state-machine@1", "id": "job",
+               "states": [{"id": "queued"}, {"id": "running"}, {"id": "done"}],
+               "start": "queued", "end": ["done"], "transitions": [
+                   {"from": "queued", "to": "running", "label": "pick"},
+                   {"from": "running", "to": "done"}
+               ], "bind": "/job"})
+    }
+
+    #[test]
+    fn state_machine_marks_entry_and_ends_and_skips_the_entry() {
+        use KeyCode::{Down, Enter, Up};
+        let mut a = App::default();
+        a.render_with(
+            "m".into(),
+            volvelle_schema::parse_spec(machine()).unwrap(),
+            Some(json!({"job": "running"})),
+        );
+        let mut term = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        let rows = screen(&mut term, &mut a);
+        assert!(rows[1].contains("│ ● │"), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("│ done ◉ │")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("pick")), "{rows:#?}");
+        assert_eq!(style_of(&term, "running").fg, Some(Color::Cyan));
+        assert_ne!(style_of(&term, "●").fg, Some(Color::Cyan));
+
+        // The marker starts on the current state; up stops at the start,
+        // never on the entry point.
+        let Some(Event::Select { id, value, .. }) = press(&mut a, &[Up, Up, Up, Enter]) else {
+            panic!("expected select")
+        };
+        assert_eq!((id.as_str(), value.as_str()), ("job", "queued"));
+
+        let patch: Vec<Op> =
+            serde_json::from_value(json!([{"op": "replace", "path": "/job", "value": "done"}]))
+                .unwrap();
+        a.render_with(
+            "m".into(),
+            volvelle_schema::parse_spec(machine()).unwrap(),
+            Some(json!({"job": "running"})),
+        );
+        assert!(a.update("m", &patch).is_empty());
+        screen(&mut term, &mut a);
+        assert_eq!(style_of(&term, "done ◉").fg, Some(Color::Cyan));
+        assert_ne!(style_of(&term, "running").fg, Some(Color::Cyan));
+        // The marker stayed on queued, where the user left it.
+        let Some(Event::Select { value, .. }) = press(&mut a, &[Down, Down, Enter]) else {
+            panic!("expected select")
+        };
+        assert_eq!(value, "done");
+    }
+
+    #[test]
+    fn display_only_state_machine_starts_the_marker_nowhere() {
+        let mut spec = machine();
+        spec.as_object_mut().unwrap().remove("id");
+        spec.as_object_mut().unwrap().remove("bind");
+        let a = app(spec);
+        assert!(!a.awaiting_input());
+        let mut spec = machine();
+        spec.as_object_mut().unwrap().remove("bind");
+        let a = app(spec);
+        let Some(Field::Graph(g)) = a.fields.get("job") else {
+            panic!("expected a graph field")
+        };
+        assert_eq!(g.ids[g.cursor], "queued", "not the entry point");
     }
 }

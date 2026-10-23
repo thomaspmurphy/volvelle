@@ -5,7 +5,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::{Item, Node, Violation};
+use crate::{Item, Node, Pattern, Violation};
 
 /// The literal a bind replaces: the atom's name, the literal's field,
 /// whether the atom needs one of the two, and whether the literal is given.
@@ -20,6 +20,9 @@ fn literal(node: &Node) -> Option<(&'static str, &'static str, bool, bool)> {
         Node::Toggle(n) => ("toggle", "value", false, n.value.is_some()),
         Node::Select(n) => ("select", "value", false, !n.value.is_empty()),
         Node::Graph(n) => ("graph", "current", false, n.current.is_some()),
+        Node::Pattern(Pattern::StateMachine(n)) => {
+            ("state-machine@1", "current", false, n.current.is_some())
+        }
         _ => return None,
     })
 }
@@ -163,6 +166,14 @@ fn fits(node: &Node, value: &Value) -> Result<(), (String, Vec<String>)> {
             Some(_) => Err(("which is not a node of the graph".into(), g.quoted_ids())),
             None => Err(("but graph needs a node id".into(), g.quoted_ids())),
         },
+        Node::Pattern(Pattern::StateMachine(m)) => match value.as_str() {
+            Some(v) if m.states.iter().any(|s| s.id == v) => Ok(()),
+            Some(_) => Err(("which is not a state of the machine".into(), m.quoted_ids())),
+            None => Err((
+                "but state-machine@1 needs a state id".into(),
+                m.quoted_ids(),
+            )),
+        },
         Node::Table(_) if serde_json::from_value::<Vec<Vec<String>>>(value.clone()).is_err() => {
             need("an array of rows, each an array of strings")
         }
@@ -247,6 +258,9 @@ fn fill(node: &mut Node, data: &Value) {
         Node::Toggle(n) => n.value = at(&n.bind).and_then(|v| v.as_bool()).or(n.value),
         Node::Progress(n) => n.value = at(&n.bind).and_then(|v| v.as_f64()).or(n.value),
         Node::Graph(n) => n.current = at(&n.bind).and_then(string).or(n.current.take()),
+        Node::Pattern(Pattern::StateMachine(n)) => {
+            n.current = at(&n.bind).and_then(string).or(n.current.take())
+        }
         Node::Select(n) => {
             if let Some(v) = at(&n.bind).and_then(string) {
                 n.value = vec![v];

@@ -181,9 +181,10 @@ impl App {
         if !same_view {
             self.edited.clear();
         }
+        let drawn = volvelle_schema::expand(&template);
         let spec = match &data {
-            Some(data) => volvelle_schema::resolve(&template, data),
-            None => template.clone(),
+            Some(data) => volvelle_schema::resolve(&drawn, data),
+            None => drawn,
         };
         let mut bound = HashSet::new();
         template.walk(&mut |n| {
