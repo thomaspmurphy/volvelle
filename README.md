@@ -365,20 +365,3 @@ viewer.
 | `VOLVELLE_FOCUS=1` | Focus the viewer pane when it opens. Off by default. |
 | `VOLVELLE_USER_LIBRARY` | Directory of the user's saved views. Defaults to `$XDG_DATA_HOME/volvelle/library`, else `~/.local/share/volvelle/library`. |
 | `VOLVELLE_LOG_DIR` | Directory for session logs (JSONL, one file per server process). Defaults to `$XDG_STATE_HOME/volvelle/sessions`, else `~/.local/state/volvelle/sessions`. |
-
-## Regenerating the demos
-
-The animated SVGs in `docs/images/demo-*.svg` are recorded from the real
-viewer. `scripts/demos/record.py` drives `volvelle-mcp` like an agent, reads
-its herdr pane after each step and writes the frames as ANSI text to
-`scripts/demos/*.frames.json`, so it needs herdr (run it from a herdr pane)
-and Python 3. `scripts/demos/svg.py` renders the committed frames without
-herdr; it needs [uv](https://docs.astral.sh/uv/) and JetBrains Mono Regular
-and Bold in `~/Library/Fonts`, or in the directory `DEMO_FONT_DIR` names,
-which it subsets and embeds.
-
-```sh
-cargo build --release
-python3 scripts/demos/record.py   # or name demos: form binding tree graph machine
-uv run scripts/demos/svg.py       # or name demos
-```

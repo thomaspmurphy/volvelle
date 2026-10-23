@@ -8,8 +8,7 @@ Reads each scripts/demos/<name>.frames.json written by record.py, emulates
 every frame with pyte and writes docs/images/demo-<name>.svg. Frame 0 is drawn
 plainly; each later frame is a layer that repaints only the rows that changed,
 shown at its start time by a CSS animation. When the view grows or shrinks,
-the window does too. No JavaScript, no SMIL, so GitHub
-renders it.
+the window does too. No JavaScript, no SMIL, so GitHub renders it.
 
 Text is set in JetBrains Mono, subset and embedded, read from ~/Library/Fonts
 or DEMO_FONT_DIR. Box-drawing characters are drawn as paths so borders join
