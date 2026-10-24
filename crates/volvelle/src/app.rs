@@ -9,6 +9,7 @@ use volvelle_schema::library::{self, By, Entry, Library, Origin, Scope};
 use volvelle_schema::{Event, Item, Node, Op, Pattern};
 
 use crate::graph::GraphState;
+use crate::link::Zoom;
 use crate::tree::TreeState;
 
 /// How long the status line stays emphasised after a key on a locked view.
@@ -83,6 +84,8 @@ pub struct App {
     /// This viewer's herdr pane, recorded as a saved view's origin.
     pub pane: Option<String>,
     pub scroll: Scroll,
+    /// Ctrl-F and views that ask to fill the screen.
+    pub zoom: Zoom,
     pub quit: bool,
 }
 
@@ -284,6 +287,10 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.quit = true;
+            return None;
+        }
+        if ctrl && key.code == KeyCode::Char('f') {
+            self.zoom.toggle();
             return None;
         }
         if self.prompt.is_some() {

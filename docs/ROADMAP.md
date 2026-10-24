@@ -137,10 +137,11 @@ canvas is ruled out, since it would give validation nothing to check.
 - Animation is data changing (item 5): updating `current` moves the
   highlight. A `trace` slot plays a sequence of states locally, with pause
   and scrub. Streaming many updates needs phase 4's frame batching.
-- Full screen through herdr's native pane zoom: a viewer key toggles it,
-  and a view can request it for maps, large tables and diagrams. It is a
-  request, so the human can zoom back out, and the viewer undoes it when the
-  view closes.
+- Done: full screen through herdr's native pane zoom. Ctrl-F toggles it,
+  and `render` takes `"zoom": true` for maps, large tables and diagrams. It
+  is a request, so the human can zoom back out, and the viewer undoes it when
+  a view that did not ask replaces it or the viewer exits. Outside herdr it
+  does nothing.
 
 ### 7. Terminal apps
 

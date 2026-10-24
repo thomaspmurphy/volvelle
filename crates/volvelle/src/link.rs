@@ -135,6 +135,96 @@ impl Herdr {
     }
 }
 
+/// Zooms the viewer's herdr pane to fill the screen, on Ctrl-F or when a view
+/// asks. A no-op outside herdr.
+#[derive(Default)]
+pub struct Zoom {
+    pane: Option<String>,
+    /// The view whose render asked for zoom. Another view replacing it, or
+    /// the viewer exiting, zooms back out.
+    requested: Option<String>,
+    /// Runs herdr calls one at a time, so an off never overtakes an on.
+    worker: Option<(Sender<&'static str>, thread::JoinHandle<()>)>,
+    #[cfg(test)]
+    sent: Vec<&'static str>,
+}
+
+impl Zoom {
+    pub fn from_env() -> Self {
+        let inside = std::env::var("HERDR_ENV").is_ok_and(|v| v == "1");
+        let pane = std::env::var("HERDR_PANE_ID").ok().filter(|_| inside);
+        let worker = pane.clone().map(|pane| {
+            let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+            let handle = thread::spawn(move || {
+                for flag in rx {
+                    let _ = Command::new("herdr")
+                        .args(["pane", "zoom", &pane, flag])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            });
+            (tx, handle)
+        });
+        Zoom {
+            pane,
+            worker,
+            ..Zoom::default()
+        }
+    }
+
+    /// Whether Ctrl-F does anything here.
+    pub fn available(&self) -> bool {
+        self.pane.is_some()
+    }
+
+    /// The human's Ctrl-F. It leaves any request alone, so a view that asked
+    /// still zooms out when it is replaced.
+    pub fn toggle(&mut self) {
+        self.send("--toggle");
+    }
+
+    /// Applies a render's request. Zooms in when a view first asks, and back
+    /// out when a view that did not ask replaces one that did. Re-rendering
+    /// the view that asked leaves the zoom as the human last set it.
+    pub fn render(&mut self, view: &str, zoom: bool) {
+        if zoom {
+            if self.requested.as_deref() != Some(view) {
+                self.requested = Some(view.to_string());
+                self.send("--on");
+            }
+        } else {
+            self.release();
+        }
+    }
+
+    /// Zooms out if a view's request is still in force.
+    pub fn release(&mut self) {
+        if self.requested.take().is_some() {
+            self.send("--off");
+        }
+    }
+
+    /// Zooms out as the viewer exits, waiting so the process does not end
+    /// before herdr hears it.
+    pub fn finish(mut self) {
+        self.release();
+        if let Some((tx, handle)) = self.worker.take() {
+            drop(tx);
+            let _ = handle.join();
+        }
+    }
+
+    fn send(&mut self, flag: &'static str) {
+        #[cfg(test)]
+        self.sent.push(flag);
+        if let Some((tx, _)) = &self.worker {
+            let _ = tx.send(flag);
+        }
+    }
+}
+
 fn herdr(args: &[&str]) {
     let child = Command::new("herdr")
         .args(args)
@@ -144,5 +234,48 @@ fn herdr(args: &[&str]) {
         .spawn();
     if let Ok(mut child) = child {
         thread::spawn(move || child.wait());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zoom() -> Zoom {
+        Zoom {
+            pane: Some("p1".into()),
+            ..Zoom::default()
+        }
+    }
+
+    #[test]
+    fn a_request_zooms_in_once_and_a_plain_view_zooms_out() {
+        let mut z = zoom();
+        z.render("map", true);
+        z.render("map", true);
+        z.render("form", false);
+        z.render("form", false);
+        assert_eq!(z.sent, ["--on", "--off"]);
+    }
+
+    #[test]
+    fn a_new_view_asking_zooms_in_again() {
+        let mut z = zoom();
+        z.render("map", true);
+        z.render("graph", true);
+        assert_eq!(z.sent, ["--on", "--on"]);
+    }
+
+    #[test]
+    fn ctrl_f_leaves_the_request_in_force() {
+        let mut z = zoom();
+        z.toggle();
+        z.render("form", false);
+        z.render("map", true);
+        z.toggle();
+        z.render("map", true);
+        z.release();
+        z.release();
+        assert_eq!(z.sent, ["--toggle", "--on", "--toggle", "--off"]);
     }
 }

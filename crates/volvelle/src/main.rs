@@ -78,6 +78,7 @@ fn viewer(project: Option<PathBuf>) -> App {
     App {
         library: Library::from_env(project.as_deref()),
         pane: std::env::var("HERDR_PANE_ID").ok(),
+        zoom: link::Zoom::from_env(),
         ..App::default()
     }
 }
@@ -98,7 +99,15 @@ fn view(socket: PathBuf, mut app: App) -> anyhow::Result<()> {
                 dirty = true;
                 match msg {
                     Msg::Request(req) => match *req {
-                        Request::Render { view, spec, data } => app.render_with(view, spec, data),
+                        Request::Render {
+                            view,
+                            spec,
+                            data,
+                            zoom,
+                        } => {
+                            app.zoom.render(&view, zoom);
+                            app.render_with(view, spec, data);
+                        }
                         Request::Update { view, patch } => {
                             let kept = app.update(&view, &patch);
                             out.borrow_mut().send(Event::Updated { view, kept });
@@ -118,6 +127,7 @@ fn view(socket: PathBuf, mut app: App) -> anyhow::Result<()> {
         },
     );
     ratatui::restore();
+    std::mem::take(&mut app.zoom).finish();
     out.borrow_mut().send(Event::Closed);
     herdr.release();
     let _ = std::fs::remove_file(&socket);

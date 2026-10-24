@@ -187,6 +187,7 @@ impl Server {
         let (spec, saved) =
             spec_arg(&self.library, args).inspect_err(|e| self.log_error(Some(&view), e))?;
         let data = data_arg(args).inspect_err(|e| self.log_error(Some(&view), e))?;
+        let zoom = zoom_arg(args).inspect_err(|e| self.log_error(Some(&view), e))?;
         let shown = volvelle_schema::bind(&spec, data.as_ref())
             .map_err(|e| format!("invalid data: {e}"))
             .inspect_err(|e| self.log_error(Some(&view), e))?;
@@ -209,6 +210,7 @@ impl Server {
                 view: view.clone(),
                 spec: spec.clone(),
                 data: data.clone(),
+                zoom,
             })
             .map_err(|e| e.to_string())
             .inspect_err(|e| self.log_error(Some(&view), e))?;
@@ -222,6 +224,9 @@ impl Server {
             None => {
                 self.data.remove(&view);
             }
+        }
+        if zoom {
+            body.push(("zoom", true.into()));
         }
         if reports {
             body.push(("reports_outcome", true.into()));
@@ -618,6 +623,15 @@ fn data_arg(args: &Value) -> Result<Option<Value>, String> {
     }
 }
 
+/// Whether the view asks to fill the screen.
+fn zoom_arg(args: &Value) -> Result<bool, String> {
+    match args.get("zoom").filter(|v| !v.is_null()) {
+        None => Ok(false),
+        Some(Value::Bool(zoom)) => Ok(*zoom),
+        Some(_) => Err("`zoom` must be a boolean; allowed: true or false".into()),
+    }
+}
+
 /// Whether any atom in the spec binds into data.
 fn has_binds(spec: &Node) -> bool {
     let mut found = false;
@@ -808,7 +822,8 @@ fn render_schema() -> Value {
             "view": {"type": "string", "description": "Names this view. Reuse it to update the view in place."},
             "spec": {"$ref": "#/$defs/Node"},
             "saved": {"type": "string", "description": "Render a saved view by name instead of a spec."},
-            "data": {"type": "object", "description": "The document the spec's `bind` pointers read. Required when the spec binds."}
+            "data": {"type": "object", "description": "The document the spec's `bind` pointers read. Required when the spec binds."},
+            "zoom": {"type": "boolean", "description": "Ask to fill the screen, for maps, large tables and diagrams. The user can zoom back out; a later view without it zooms out."}
         },
         "required": ["view"],
         "$defs": defs
@@ -1009,6 +1024,27 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn zoom_reaches_the_viewer_and_the_log() {
+        let root = temp("zoom");
+        let (mut server, fake) = server(&root);
+        let spec = json!({"type": "text", "text": "map"});
+        let refused = reply(&server.call("render", &json!({"view": "m", "spec": spec, "zoom": 1})));
+        assert_eq!(
+            refused.unwrap_err(),
+            "`zoom` must be a boolean; allowed: true or false"
+        );
+        let args = json!({"view": "m", "spec": spec, "zoom": true});
+        reply(&server.call("render", &args)).unwrap();
+        assert_eq!(fake.join().unwrap()["zoom"], true);
+        let render = records(&root)
+            .into_iter()
+            .find(|r| r["kind"] == "render")
+            .unwrap();
+        assert_eq!(render["zoom"], true);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -888,6 +888,11 @@ pub enum Request {
         spec: Node,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<Value>,
+        /// Ask to fill the screen, for maps, large tables and diagrams. The
+        /// human can zoom back out, and the viewer undoes it when another
+        /// view replaces this one.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        zoom: bool,
     },
     /// Apply a patch to the view's data and redraw what is bound to it,
     /// keeping focus, scroll and any bound field the user has edited. The
