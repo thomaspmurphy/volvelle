@@ -353,8 +353,10 @@ the parent, and Space toggles a fold. In a graph, the arrows (or h, j, k and l) 
 focus marker to the nearest node that way, and the view pans to keep it in
 sight. PageUp and PageDown scroll a view
 taller than the pane; J and K (or Shift-Up and Shift-Down) scroll a long
-preview. Esc cancels. Ctrl-S saves the view to a library. Ctrl-C closes the
-viewer.
+preview. Esc cancels. Ctrl-S saves the view to a library. Ctrl-F zooms the
+viewer's herdr pane to fill the screen and back; an agent can ask for this
+with `"zoom": true` on `render`, and a later view that does not ask zooms
+out again. Ctrl-C closes the viewer.
 
 ## Environment
 

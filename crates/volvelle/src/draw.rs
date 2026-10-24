@@ -251,7 +251,11 @@ fn status_line(app: &App) -> Line<'static> {
             " tab next · shift-tab back · space toggle · enter confirm · esc cancel",
         ))
     } else {
-        Line::from(hint(" ctrl-s save · ctrl-c close"))
+        Line::from(hint(if app.zoom.available() {
+            " ctrl-s save · ctrl-f zoom · ctrl-c close"
+        } else {
+            " ctrl-s save · ctrl-c close"
+        }))
     }
 }
 
